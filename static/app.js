@@ -683,15 +683,29 @@ async function loadRecords() {
             return;
         }
         
-        // Display in reverse chronological order (newest first)
-        const sortedRecords = [...data.records].reverse();
+        // Sort by robot_id (asc), then by timestamp (asc)
+        const sortedRecords = [...data.records].sort((a, b) => {
+            const idDiff = parseInt(a.robot_id) - parseInt(b.robot_id);
+            if (idDiff !== 0) return idDiff;
+            return new Date(a.timestamp) - new Date(b.timestamp);
+        });
+        
+        let lastRobotId = null;
         
         sortedRecords.forEach(record => {
+            // Add a visual separator when robot ID changes
+            if (lastRobotId !== null && lastRobotId !== record.robot_id) {
+                const sep = document.createElement('tr');
+                sep.innerHTML = `<td colspan="3" style="border-bottom: 2px solid rgba(255,255,255,0.2);"></td>`;
+                tbody.appendChild(sep);
+            }
+            lastRobotId = record.robot_id;
+            
             const tr = document.createElement('tr');
             tr.innerHTML = `
                 <td style="padding: 0.75rem; border-bottom: 1px solid rgba(255,255,255,0.05); color: #8b92a5;">${record.timestamp}</td>
-                <td style="padding: 0.75rem; border-bottom: 1px solid rgba(255,255,255,0.05);"><span class="badge" style="background: rgba(59,130,246,0.2); color: #60a5fa;">#${record.robot_id}</span></td>
-                <td style="padding: 0.75rem; border-bottom: 1px solid rgba(255,255,255,0.05);">${record.memo}</td>
+                <td style="padding: 0.75rem; border-bottom: 1px solid rgba(255,255,255,0.05);"><span class="badge" style="background: rgba(59,130,246,0.2); color: #60a5fa; font-size: 1.1rem; padding: 4px 8px;">#${record.robot_id}</span></td>
+                <td style="padding: 0.75rem; border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 1.1rem;">${record.memo}</td>
             `;
             tbody.appendChild(tr);
         });

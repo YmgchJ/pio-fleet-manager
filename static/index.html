@@ -251,16 +251,16 @@
             <div class="glass-panel">
                 <h2>新規メモを記録</h2>
                 <div style="display: flex; gap: 1rem; align-items: flex-start; margin-bottom: 1rem;">
-                    <div class="form-group" style="width: 150px; margin-bottom: 0;">
+                    <div class="form-group" style="width: 200px; margin-bottom: 0;">
                         <label>ロボット番号</label>
-                        <select id="record-robot-id" style="background: rgba(0,0,0,0.2); border: 1px solid var(--border-light); color: #fff; padding: 0.5rem; border-radius: 8px; width: 100%;">
+                        <select id="record-robot-id" style="background: rgba(0,0,0,0.2); border: 1px solid var(--border-light); color: #fff; padding: 0.75rem; border-radius: 8px; width: 100%; font-size: 1.1rem; cursor: pointer;">
                             <option value="">選択...</option>
                             <!-- JS will populate options up to 20 -->
                         </select>
                     </div>
                     <div class="form-group" style="flex: 1; margin-bottom: 0;">
                         <label>メモ・状態 (例: 右モータ異音、バッテリー劣化など)</label>
-                        <input type="text" id="record-memo" placeholder="メモを入力..." style="background: rgba(0,0,0,0.2); border: 1px solid var(--border-light); color: #fff; padding: 0.5rem; border-radius: 8px; width: 100%;">
+                        <input type="text" id="record-memo" placeholder="メモを入力..." style="background: rgba(0,0,0,0.2); border: 1px solid var(--border-light); color: #fff; padding: 0.75rem; border-radius: 8px; width: 100%; font-size: 1.1rem;">
                     </div>
                     <div style="padding-top: 1.5rem;">
                         <button class="btn btn-primary" onclick="submitRecord()">記録する</button>
