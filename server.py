@@ -589,3 +589,64 @@ def add_record(req: RecordRequest):
         raise HTTPException(status_code=500, detail=f"Failed to save record: {e}")
         
     return {"status": "success", "timestamp": timestamp}
+
+class EditRecordRequest(BaseModel):
+    timestamp: str
+    robot_id: int
+    new_memo: str
+
+@app.put("/api/records")
+def edit_record(req: EditRecordRequest):
+    if not RECORDS_CSV_PATH.exists():
+        raise HTTPException(status_code=404, detail="Records file not found")
+        
+    records = []
+    updated = False
+    with open(RECORDS_CSV_PATH, 'r', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            if row['timestamp'] == req.timestamp and str(row['robot_id']) == str(req.robot_id):
+                row['memo'] = req.new_memo
+                updated = True
+            records.append(row)
+            
+    if not updated:
+        raise HTTPException(status_code=404, detail="Record not found")
+        
+    with open(RECORDS_CSV_PATH, 'w', encoding='utf-8', newline='') as f:
+        fieldnames = ['timestamp', 'robot_id', 'memo']
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(records)
+        
+    return {"status": "success"}
+
+class DeleteRecordRequest(BaseModel):
+    timestamp: str
+    robot_id: int
+
+@app.delete("/api/records")
+def delete_record(req: DeleteRecordRequest):
+    if not RECORDS_CSV_PATH.exists():
+        raise HTTPException(status_code=404, detail="Records file not found")
+        
+    records = []
+    deleted = False
+    with open(RECORDS_CSV_PATH, 'r', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            if row['timestamp'] == req.timestamp and str(row['robot_id']) == str(req.robot_id):
+                deleted = True
+                continue
+            records.append(row)
+            
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Record not found")
+        
+    with open(RECORDS_CSV_PATH, 'w', encoding='utf-8', newline='') as f:
+        fieldnames = ['timestamp', 'robot_id', 'memo']
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(records)
+        
+    return {"status": "success"}

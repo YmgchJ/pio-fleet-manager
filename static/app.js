@@ -134,7 +134,7 @@ async function loadFleet(silent = false) {
                     <div style="flex: 1; min-width: 0; padding-right: 1rem;">
                         <div style="display: flex; justify-content: space-between; align-items: center; margin: 0 0 0.4rem 0;">
                             <h3 style="margin: 0; font-size: 1.1rem; white-space: nowrap;">ID: ${agent.id} | ${agent.hostname}</h3>
-                            ${latestMemos[agent.id] ? `<span style="font-size: 0.9rem; color: #fbbf24; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: right; margin-left: 1rem;">${latestMemos[agent.id]}</span>` : ''}
+                            ${latestMemos[agent.id] ? `<span style="font-size: 0.75rem; color: #fbbf24; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: right; margin-left: 1rem;">${latestMemos[agent.id]}</span>` : ''}
                         </div>
                         <div style="font-size: 0.85rem; color: var(--text-muted); line-height: 1.4;">
                             <div>UID: ${agent.uid}</div>
@@ -712,7 +712,7 @@ async function loadRecords() {
             // Add a visual separator when robot ID changes
             if (lastRobotId !== null && lastRobotId !== record.robot_id) {
                 const sep = document.createElement('tr');
-                sep.innerHTML = `<td colspan="3" style="border-bottom: 2px solid rgba(255,255,255,0.2);"></td>`;
+                sep.innerHTML = `<td colspan="4" style="border-bottom: 2px solid rgba(255,255,255,0.2);"></td>`;
                 tbody.appendChild(sep);
             }
             lastRobotId = record.robot_id;
@@ -722,6 +722,10 @@ async function loadRecords() {
                 <td style="padding: 0.75rem; border-bottom: 1px solid rgba(255,255,255,0.05); color: #8b92a5;">${record.timestamp}</td>
                 <td style="padding: 0.75rem; border-bottom: 1px solid rgba(255,255,255,0.05);"><span class="badge" style="background: rgba(59,130,246,0.2); color: #60a5fa; font-size: 1.1rem; padding: 4px 8px;">#${record.robot_id}</span></td>
                 <td style="padding: 0.75rem; border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 1.1rem;">${record.memo}</td>
+                <td style="padding: 0.75rem; border-bottom: 1px solid rgba(255,255,255,0.05); text-align: right; white-space: nowrap;">
+                    <button class="btn" style="background: transparent; border: 1px solid #3b82f6; color: #3b82f6; padding: 0.3rem 0.6rem; font-size: 0.8rem; margin-right: 0.5rem;" onclick="editRecord('${record.timestamp}', '${record.robot_id}', '${record.memo.replace(/'/g, "\\'")}')">編集</button>
+                    <button class="btn" style="background: transparent; border: 1px solid #ef4444; color: #ef4444; padding: 0.3rem 0.6rem; font-size: 0.8rem;" onclick="deleteRecord('${record.timestamp}', '${record.robot_id}')">削除</button>
+                </td>
             `;
             tbody.appendChild(tr);
         });
@@ -779,3 +783,53 @@ document.addEventListener('DOMContentLoaded', () => {
     initRecordsDropdown();
     loadRecords();
 });
+
+async function editRecord(timestamp, robotId, currentMemo) {
+    const newMemo = prompt("新しいメモを入力してください:", currentMemo);
+    if (newMemo === null || newMemo === currentMemo) return;
+    
+    try {
+        const response = await fetch('/api/records', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                timestamp: timestamp,
+                robot_id: parseInt(robotId),
+                new_memo: newMemo
+            })
+        });
+        
+        if (response.ok) {
+            loadRecords(); // Refresh table
+            loadFleet(true); // Refresh fleet ledger
+        } else {
+            alert("エラーが発生しました。");
+        }
+    } catch (e) {
+        console.error("Failed to edit record", e);
+    }
+}
+
+async function deleteRecord(timestamp, robotId) {
+    if (!confirm(`この記録を削除しますか？\n日時: ${timestamp}\nロボットID: ${robotId}`)) return;
+    
+    try {
+        const response = await fetch('/api/records', {
+            method: 'DELETE',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                timestamp: timestamp,
+                robot_id: parseInt(robotId)
+            })
+        });
+        
+        if (response.ok) {
+            loadRecords(); // Refresh table
+            loadFleet(true); // Refresh fleet ledger
+        } else {
+            alert("エラーが発生しました。");
+        }
+    } catch (e) {
+        console.error("Failed to delete record", e);
+    }
+}
