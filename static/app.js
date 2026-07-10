@@ -668,3 +668,84 @@ document.addEventListener('DOMContentLoaded', () => {
     connectTelemetryWs();
 });
 
+
+// --- Records Management ---
+async function loadRecords() {
+    try {
+        const response = await fetch('/api/records');
+        const data = await response.json();
+        
+        const tbody = document.getElementById('records-tbody');
+        tbody.innerHTML = '';
+        
+        if (!data.records || data.records.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="3" style="text-align: center; padding: 2rem; color: var(--text-muted);">まだ記録がありません</td></tr>';
+            return;
+        }
+        
+        // Display in reverse chronological order (newest first)
+        const sortedRecords = [...data.records].reverse();
+        
+        sortedRecords.forEach(record => {
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+                <td style="padding: 0.75rem; border-bottom: 1px solid rgba(255,255,255,0.05); color: #8b92a5;">${record.timestamp}</td>
+                <td style="padding: 0.75rem; border-bottom: 1px solid rgba(255,255,255,0.05);"><span class="badge" style="background: rgba(59,130,246,0.2); color: #60a5fa;">#${record.robot_id}</span></td>
+                <td style="padding: 0.75rem; border-bottom: 1px solid rgba(255,255,255,0.05);">${record.memo}</td>
+            `;
+            tbody.appendChild(tr);
+        });
+    } catch (e) {
+        console.error("Failed to load records", e);
+    }
+}
+
+async function submitRecord() {
+    const robotId = document.getElementById('record-robot-id').value;
+    const memo = document.getElementById('record-memo').value;
+    
+    if (!robotId || !memo) {
+        alert("ロボット番号とメモを入力してください。");
+        return;
+    }
+    
+    try {
+        const response = await fetch('/api/records', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                robot_id: parseInt(robotId),
+                memo: memo
+            })
+        });
+        
+        if (response.ok) {
+            document.getElementById('record-memo').value = '';
+            loadRecords(); // Refresh table
+        } else {
+            alert("エラーが発生しました。");
+        }
+    } catch (e) {
+        console.error("Failed to submit record", e);
+    }
+}
+
+// Populate robot ID dropdown (1-20)
+function initRecordsDropdown() {
+    const select = document.getElementById('record-robot-id');
+    if (!select) return;
+    
+    select.innerHTML = '<option value="">選択...</option>';
+    for (let i = 1; i <= 20; i++) {
+        const option = document.createElement('option');
+        option.value = i;
+        option.textContent = i;
+        select.appendChild(option);
+    }
+}
+
+// Load records on init
+document.addEventListener('DOMContentLoaded', () => {
+    initRecordsDropdown();
+    loadRecords();
+});

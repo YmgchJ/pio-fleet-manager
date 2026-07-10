@@ -4,6 +4,8 @@ import yaml
 import json
 import asyncio
 import subprocess
+import csv
+from datetime import datetime
 from pathlib import Path
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.staticfiles import StaticFiles
@@ -139,6 +141,8 @@ FLEET_MANAGER_ROOT = Path(__file__).resolve().parent
 FIRMWARE_DIR = Path(os.environ.get("PIO_FIRMWARE_DIR", os.getcwd()))
 # AGENTS_YAML_PATH is where the fleet registry is saved
 AGENTS_YAML_PATH = Path(os.environ.get("PIO_AGENTS_PATH", FLEET_MANAGER_ROOT / "agents.yaml"))
+# RECORDS_CSV_PATH is where the robot memos/records are saved
+RECORDS_CSV_PATH = FLEET_MANAGER_ROOT / "data" / "records.csv"
 # Optional script to run after registration (e.g. to generate C++ headers)
 POST_REG_SCRIPT = os.environ.get("PIO_POST_REG_SCRIPT", None)
 
@@ -543,3 +547,45 @@ async def websocket_upload(websocket: WebSocket):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True)
+
+from pydantic import BaseModel
+class RecordRequest(BaseModel):
+    robot_id: int
+    memo: str
+
+@app.get("/api/records")
+def get_records():
+    if not RECORDS_CSV_PATH.exists():
+        return {"records": []}
+    records = []
+    try:
+        with open(RECORDS_CSV_PATH, 'r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                records.append(row)
+    except Exception as e:
+        print(f"Error reading records: {e}")
+    return {"records": records}
+
+@app.post("/api/records")
+def add_record(req: RecordRequest):
+    file_exists = RECORDS_CSV_PATH.exists()
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    try:
+        with open(RECORDS_CSV_PATH, 'a', encoding='utf-8', newline='') as f:
+            fieldnames = ['timestamp', 'robot_id', 'memo']
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            
+            if not file_exists:
+                writer.writeheader()
+                
+            writer.writerow({
+                'timestamp': timestamp,
+                'robot_id': req.robot_id,
+                'memo': req.memo
+            })
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save record: {e}")
+        
+    return {"status": "success", "timestamp": timestamp}

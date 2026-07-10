@@ -41,6 +41,7 @@
     <div style="padding: 1rem 5%; display: flex; gap: 1rem; border-bottom: 1px solid rgba(255,255,255,0.1);">
         <button id="btn-tab-fleet" class="tab-btn active" onclick="switchTab('fleet')">構成管理 (Fleet)</button>
         <button id="btn-tab-monitor" class="tab-btn" onclick="switchTab('monitor')">モニタリングと制御 (Monitor)</button>
+        <button id="btn-tab-records" class="tab-btn" onclick="switchTab('records')">記録 (Records)</button>
     </div>
 
     <div id="tab-fleet" class="container">
@@ -86,7 +87,7 @@
             </div>
 
             <!-- Discovery Panel -->
-            <div class="glass-panel discovery-section">
+            <div class="glass-panel">
                 <h2>
                     <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
                     【新規のみ】デバイス検出と初期登録 (Scan)
@@ -242,13 +243,58 @@
                 </div>
             </div>
         </div>
+    <!-- Records Tab -->
+    <div id="tab-records" class="container" style="display: none; grid-template-columns: 1fr;">
+        <div style="display: flex; flex-direction: column; gap: 2rem; max-width: 800px; margin: 0 auto; width: 100%;">
+            
+            <div class="glass-panel">
+                <h2>📝 新規メモを記録</h2>
+                <div style="display: flex; gap: 1rem; align-items: flex-start; margin-bottom: 1rem;">
+                    <div class="form-group" style="width: 150px; margin-bottom: 0;">
+                        <label>ロボット番号</label>
+                        <select id="record-robot-id" style="background: rgba(0,0,0,0.2); border: 1px solid var(--border-light); color: #fff; padding: 0.5rem; border-radius: 8px; width: 100%;">
+                            <option value="">選択...</option>
+                            <!-- JS will populate options up to 20 -->
+                        </select>
+                    </div>
+                    <div class="form-group" style="flex: 1; margin-bottom: 0;">
+                        <label>メモ・状態 (例: 右モータ異音、バッテリー劣化など)</label>
+                        <input type="text" id="record-memo" placeholder="メモを入力..." style="background: rgba(0,0,0,0.2); border: 1px solid var(--border-light); color: #fff; padding: 0.5rem; border-radius: 8px; width: 100%;">
+                    </div>
+                    <div style="padding-top: 1.5rem;">
+                        <button class="btn btn-primary" onclick="submitRecord()">記録する</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="glass-panel">
+                <h2>📋 記録履歴</h2>
+                <div style="overflow-x: auto;">
+                    <table style="width: 100%; border-collapse: collapse; text-align: left;">
+                        <thead>
+                            <tr style="border-bottom: 1px solid rgba(255,255,255,0.2);">
+                                <th style="padding: 0.75rem; color: var(--text-muted);">日時</th>
+                                <th style="padding: 0.75rem; color: var(--text-muted);">ロボットID</th>
+                                <th style="padding: 0.75rem; color: var(--text-muted);">メモ</th>
+                            </tr>
+                        </thead>
+                        <tbody id="records-tbody">
+                            <tr><td colspan="3" style="text-align: center; padding: 2rem; color: var(--text-muted);">記録を読み込み中...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+        </div>
     </div>
 
+    <!-- Scripts -->
     <script src="/static/app.js"></script>
     <script>
         function switchTab(tabId) {
             document.getElementById('tab-fleet').style.display = tabId === 'fleet' ? 'grid' : 'none';
             document.getElementById('tab-monitor').style.display = tabId === 'monitor' ? 'flex' : 'none';
+            document.getElementById('tab-records').style.display = tabId === 'records' ? 'grid' : 'none';
             
             document.getElementById('btn-tab-fleet').className = tabId === 'fleet' ? 'tab-btn active' : 'tab-btn';
             document.getElementById('btn-tab-monitor').className = tabId === 'monitor' ? 'tab-btn active' : 'tab-btn';
