@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PIO Fleet Manager</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        .tab-btn { background: transparent; border: 1px solid var(--border-light); color: var(--text-muted); padding: 0.5rem 1.5rem; border-radius: 8px; cursor: pointer; transition: 0.3s; }
+        .tab-btn.active { background: var(--primary); color: #fff; border-color: var(--primary); }
+    </style>
+</head>
+<body>
+    <header style="display: flex; flex-direction: column; gap: 0.75rem;">
+        <div style="display: flex; justify-content: space-between; align-items: center; gap: 2rem; flex-wrap: wrap;">
+            <h1 style="margin: 0; font-size: 1.25rem;">PIO Fleet Manager</h1>
+            
+            <!-- Global Upload Status -->
+            <div id="upload-progress-container" style="display: flex; align-items: center; gap: 1rem; background: rgba(0,0,0,0.3); padding: 0.4rem 1rem; border-radius: 8px; border: 1px solid var(--border-light); width: 350px;">
+                <div style="font-size: 0.8rem; font-weight: bold; width: 90px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" id="upload-status-text">待機中...</div>
+                <div style="flex: 1; height: 6px; background: rgba(255,255,255,0.1); border-radius: 3px; overflow: hidden;">
+                    <div id="upload-progress-bar" style="width: 0%; height: 100%; background: var(--accent-blue); transition: width 0.2s ease, background 0.3s ease;"></div>
+                </div>
+                <div style="font-size: 0.8rem; width: 35px; text-align: right;" id="upload-percent">0%</div>
+            </div>
+        </div>
+
+        <!-- Mini Fleet Connection Status (Sticky row) -->
+        <div id="global-fleet-status" style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+            <!-- JS will populate this -->
+            <div style="font-size: 0.8rem; color: var(--text-muted);">モジュール状態を読み込み中...</div>
+        </div>
+    </header>
+
+    <div style="padding: 1rem 5%; display: flex; gap: 1rem; border-bottom: 1px solid rgba(255,255,255,0.1);">
+        <button id="btn-tab-fleet" class="tab-btn active" onclick="switchTab('fleet')">構成管理 (Fleet)</button>
+        <button id="btn-tab-monitor" class="tab-btn" onclick="switchTab('monitor')">モニタリングと制御 (Monitor)</button>
+    </div>
+
+    <div id="tab-fleet" class="container">
+        <!-- Left Column: Registry & Terminal -->
+        <div style="display: flex; flex-direction: column; gap: 2rem;">
+            
+            <!-- Fleet Registry -->
+            <div class="glass-panel">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem;">
+                    <h2 style="margin: 0;">
+                        <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 002-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path></svg>
+                        ロボット台帳 (Fleet Registry)
+                    </h2>
+                    <button class="btn btn-outline" id="btn-batch-ota" style="display: flex; align-items: center; gap: 0.5rem; background: rgba(59,130,246,0.1); border-color: rgba(59,130,246,0.4); color: #60a5fa; padding: 0.5rem 1rem;">
+                        <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                        </svg>
+                        全機一括OTA (オンラインのみ)
+                    </button>
+                </div>
+                <div class="device-list" id="fleet-list">
+                    <div class="empty-state">台帳を読み込み中...</div>
+                </div>
+            </div>
+
+
+            
+        </div>
+
+        <!-- Right Column: Discovery & Tools -->
+        <div style="display: flex; flex-direction: column; gap: 2rem;">
+            
+            <!-- Discovery Panel -->
+            <div class="glass-panel discovery-section">
+                <h2>
+                    <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
+                    【新規のみ】デバイス検出と初期登録 (Scan)
+                </h2>
+                <div style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 1rem; background: rgba(255,255,255,0.05); padding: 0.75rem; border-radius: 8px; border-left: 3px solid #3b82f6;">
+                    <p style="margin: 0 0 0.5rem 0;">※ ここは<strong>【未登録の新品】専用</strong>です。登録済み機体は下部リストから更新してください。</p>
+                    
+                    <details>
+                        <summary style="cursor: pointer; color: #3b82f6; font-weight: bold; outline: none; user-select: none;">📝 詳しい登録手順（クリックで展開）</summary>
+                        <div style="margin-top: 0.5rem; padding: 0.75rem; background: rgba(0,0,0,0.2); border-radius: 6px; line-height: 1.5;">
+                            <p style="margin: 0 0 0.5rem 0;"><strong>【STEP 1】初期プログラムの書き込み</strong><br>
+                            工場出荷時の新品基板は、PCからの自動再起動命令を受け取れません。<strong>最初の1回目だけは、基板上の白いボタン(BOOTSEL)を押しながらUSBを繋ぎ</strong>、すぐ下の「未登録基板へ強制書き込み」を押してください。</p>
+                            <p style="margin: 0 0 0.5rem 0;"><strong>【STEP 2】</strong> 下の黒い画面に <span style="color: #10b981;">SUCCESS</span> と出て再起動したら、<strong>3〜5秒ほど待ってから一度ブラウザをリロード（Cmd+R）</strong> します。</p>
+                            <p style="margin: 0;"><strong>【STEP 3】</strong> 「USBポート」を選んで「ポートをスキャン」を押すと、ID（例: 4）とホスト名（例: robot-04）を決める画面が出るので登録して完了です！</p>
+                            <div style="margin-top: 0.5rem; padding-top: 0.5rem; border-top: 1px solid rgba(255,255,255,0.1); font-size: 0.75rem; color: #8b92a5;">
+                                ※一度でもこのプログラムが書き込まれた基板は「賢く」なるため、次回のアップデートからはボタンを押さずにただUSBを挿すだけで書き込めるようになります。
+                            </div>
+                        </div>
+                    </details>
+                </div>
+
+                <div class="form-group">
+                    <label>USBポート</label>
+                    <select id="port-select" style="background: rgba(0,0,0,0.2); border: 1px solid var(--border-light); color: #fff; padding: 0.5rem; border-radius: 8px;">
+                        <option value="">ポートを選択...</option>
+                    </select>
+                </div>
+                
+                <button class="btn btn-primary" id="btn-scan" style="width: 100%; margin-bottom: 0.5rem;">
+                    ポートをスキャン (登録用)
+                </button>
+                <button class="btn btn-usb" style="width: 100%;" onclick="startUpload('usb', document.getElementById('port-select').value || 'auto')">
+                    未登録基板へ強制書き込み (BOOTSEL兼用)
+                </button>
+
+                <div id="scan-result" style="margin-top: 1.5rem; display: none;">
+                    <!-- Filled by JS -->
+                </div>
+            </div>
+
+            <!-- System Management -->
+            <div class="glass-panel">
+                <h2>システム管理</h2>
+                <button class="btn" style="width: 100%; margin-bottom: 0.5rem; background: transparent; border: 1px solid var(--text-muted); color: var(--text-main);" onclick="startUpload('build', 'auto')">
+                    ✓ コンパイルテスト (書き込まずにエラーチェック)
+                </button>
+                <button class="btn" style="width: 100%; margin-bottom: 0.5rem;" onclick="loadFleet()">
+                    ↻ 台帳を更新
+                </button>
+            </div>
+
+            <!-- Terminal output -->
+            <div class="glass-panel" style="flex: 1; display: flex; flex-direction: column;">
+                <h2>
+                    <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
+                    書き込みログ (Terminal)
+                </h2>
+                
+                <!-- Progress bar moved to header -->
+
+                <div class="terminal" id="terminal">
+                    <div class="terminal-line" style="color: #8b92a5;">待機中...</div>
+                </div>
+            </div>
+
+        </div>
+    </div>
+
+    <!-- Monitoring Tab -->
+    <div id="tab-monitor" class="container" style="display: none; flex-direction: column;">
+        <div class="glass-panel" style="margin-bottom: 2rem;">
+            <h2 style="display: flex; justify-content: space-between; align-items: center;">
+                <span>
+                    <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="vertical-align: middle;"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
+                    フリート一斉制御 (Global Command)
+                </span>
+            </h2>
+            <div style="display: flex; gap: 1rem; margin-top: 1rem;">
+                <button class="btn btn-primary" style="flex: 1; padding: 1rem; font-size: 1.2rem; background: #10b981;" onclick="sendGlobalCommand('START')">▶ START ALL (一斉開始)</button>
+                <button class="btn btn-primary" style="flex: 1; padding: 1rem; font-size: 1.2rem; background: #ef4444;" onclick="sendGlobalCommand('STOP')">■ STOP ALL (一斉停止)</button>
+            </div>
+        </div>
+
+        <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 2rem;">
+            <!-- Chart Panel Template -->
+            <div class="glass-panel">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+                    <h2 style="margin: 0; font-size: 1.1rem;">サーボ角度 (Angle)</h2>
+                    <div style="display: flex; gap: 0.25rem;">
+                        <input type="number" id="minAngle" value="0" style="width: 50px; background: rgba(0,0,0,0.3); border: 1px solid var(--border-light); color: #fff; border-radius: 4px; padding: 2px 4px; font-size: 0.8rem;" onchange="updateChartScale('Angle')">
+                        <span style="color: var(--text-muted);">~</span>
+                        <input type="number" id="maxAngle" value="180" style="width: 50px; background: rgba(0,0,0,0.3); border: 1px solid var(--border-light); color: #fff; border-radius: 4px; padding: 2px 4px; font-size: 0.8rem;" onchange="updateChartScale('Angle')">
+                    </div>
+                </div>
+                <div style="position: relative; width: 100%; aspect-ratio: 1 / 1;">
+                    <canvas id="chartAngle"></canvas>
+                </div>
+            </div>
+            
+            <div class="glass-panel">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+                    <h2 style="margin: 0; font-size: 1.1rem;">曲げセンサ (Flex)</h2>
+                    <div style="display: flex; gap: 0.25rem;">
+                        <input type="number" id="minFlex" value="500" style="width: 50px; background: rgba(0,0,0,0.3); border: 1px solid var(--border-light); color: #fff; border-radius: 4px; padding: 2px 4px; font-size: 0.8rem;" onchange="updateChartScale('Flex')">
+                        <span style="color: var(--text-muted);">~</span>
+                        <input type="number" id="maxFlex" value="900" style="width: 50px; background: rgba(0,0,0,0.3); border: 1px solid var(--border-light); color: #fff; border-radius: 4px; padding: 2px 4px; font-size: 0.8rem;" onchange="updateChartScale('Flex')">
+                    </div>
+                </div>
+                <div style="position: relative; width: 100%; aspect-ratio: 1 / 1;">
+                    <canvas id="chartFlex"></canvas>
+                </div>
+            </div>
+            
+            <div class="glass-panel">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+                    <h2 style="margin: 0; font-size: 1.1rem;">光センサ (Light)</h2>
+                    <div style="display: flex; gap: 0.25rem;">
+                        <input type="number" id="minLight" value="0" style="width: 50px; background: rgba(0,0,0,0.3); border: 1px solid var(--border-light); color: #fff; border-radius: 4px; padding: 2px 4px; font-size: 0.8rem;" onchange="updateChartScale('Light')">
+                        <span style="color: var(--text-muted);">~</span>
+                        <input type="number" id="maxLight" value="4095" style="width: 50px; background: rgba(0,0,0,0.3); border: 1px solid var(--border-light); color: #fff; border-radius: 4px; padding: 2px 4px; font-size: 0.8rem;" onchange="updateChartScale('Light')">
+                    </div>
+                </div>
+                <div style="position: relative; width: 100%; aspect-ratio: 1 / 1;">
+                    <canvas id="chartLight"></canvas>
+                </div>
+            </div>
+            
+            <div class="glass-panel">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+                    <h2 style="margin: 0; font-size: 1.1rem;">電流センサ (Current)</h2>
+                    <div style="display: flex; gap: 0.25rem;">
+                        <input type="number" id="minCurrent" value="0" style="width: 50px; background: rgba(0,0,0,0.3); border: 1px solid var(--border-light); color: #fff; border-radius: 4px; padding: 2px 4px; font-size: 0.8rem;" onchange="updateChartScale('Current')">
+                        <span style="color: var(--text-muted);">~</span>
+                        <input type="number" id="maxCurrent" value="4095" style="width: 50px; background: rgba(0,0,0,0.3); border: 1px solid var(--border-light); color: #fff; border-radius: 4px; padding: 2px 4px; font-size: 0.8rem;" onchange="updateChartScale('Current')">
+                    </div>
+                </div>
+                <div style="position: relative; width: 100%; aspect-ratio: 1 / 1;">
+                    <canvas id="chartCurrent"></canvas>
+                </div>
+            </div>
+
+            <div class="glass-panel">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+                    <h2 style="margin: 0; font-size: 1.1rem;">消費電力 (Power)</h2>
+                    <div style="display: flex; gap: 0.25rem;">
+                        <input type="number" id="minPower" value="0" style="width: 50px; background: rgba(0,0,0,0.3); border: 1px solid var(--border-light); color: #fff; border-radius: 4px; padding: 2px 4px; font-size: 0.8rem;" onchange="updateChartScale('Power')">
+                        <span style="color: var(--text-muted);">~</span>
+                        <input type="number" id="maxPower" value="50000" style="width: 50px; background: rgba(0,0,0,0.3); border: 1px solid var(--border-light); color: #fff; border-radius: 4px; padding: 2px 4px; font-size: 0.8rem;" onchange="updateChartScale('Power')">
+                    </div>
+                </div>
+                <div style="position: relative; width: 100%; aspect-ratio: 1 / 1;">
+                    <canvas id="chartPower"></canvas>
+                </div>
+            </div>
+            
+            <div class="glass-panel">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+                    <h2 style="margin: 0; font-size: 1.1rem;">電圧 (Voltage)</h2>
+                    <div style="display: flex; gap: 0.25rem;">
+                        <input type="number" id="minVoltage" value="0" style="width: 50px; background: rgba(0,0,0,0.3); border: 1px solid var(--border-light); color: #fff; border-radius: 4px; padding: 2px 4px; font-size: 0.8rem;" onchange="updateChartScale('Voltage')">
+                        <span style="color: var(--text-muted);">~</span>
+                        <input type="number" id="maxVoltage" value="10" style="width: 50px; background: rgba(0,0,0,0.3); border: 1px solid var(--border-light); color: #fff; border-radius: 4px; padding: 2px 4px; font-size: 0.8rem;" onchange="updateChartScale('Voltage')">
+                    </div>
+                </div>
+                <div style="position: relative; width: 100%; aspect-ratio: 1 / 1;">
+                    <canvas id="chartVoltage"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+    <script>
+        function switchTab(tabId) {
+            document.getElementById('tab-fleet').style.display = tabId === 'fleet' ? 'grid' : 'none';
+            document.getElementById('tab-monitor').style.display = tabId === 'monitor' ? 'flex' : 'none';
+            
+            document.getElementById('btn-tab-fleet').className = tabId === 'fleet' ? 'tab-btn active' : 'tab-btn';
+            document.getElementById('btn-tab-monitor').className = tabId === 'monitor' ? 'tab-btn active' : 'tab-btn';
+        }
+    </script>
+</body>
+</html>
