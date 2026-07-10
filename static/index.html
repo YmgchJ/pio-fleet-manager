@@ -242,6 +242,8 @@
                 </div>
             </div>
         </div>
+    </div>
+    
     <!-- Records Tab -->
     <div id="tab-records" class="container" style="display: none; grid-template-columns: 1fr;">
         <div style="display: flex; flex-direction: column; gap: 2rem; max-width: 800px; margin: 0 auto; width: 100%;">
@@ -297,6 +299,7 @@
             
             document.getElementById('btn-tab-fleet').className = tabId === 'fleet' ? 'tab-btn active' : 'tab-btn';
             document.getElementById('btn-tab-monitor').className = tabId === 'monitor' ? 'tab-btn active' : 'tab-btn';
+            document.getElementById('btn-tab-records').className = tabId === 'records' ? 'tab-btn active' : 'tab-btn';
         }
     </script>
 </body>
