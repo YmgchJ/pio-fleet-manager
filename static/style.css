@@ -45,9 +45,7 @@ header {
 header h1 {
   font-size: 1.5rem;
   font-weight: 600;
-  background: linear-gradient(90deg, #fff, #8b92a5);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
+  color: var(--text-main);
 }
 
 .container {
@@ -212,11 +210,17 @@ h2 {
 .discovery-section {
   background: #111827; /* Solid dark color instead of transparent */
   border: 1px dashed #3b82f6;
+  backdrop-filter: none; /* Disable glass effect */
+}
+
+.terminal-section {
+  background: #111827;
+  border: 1px solid var(--border-light);
   position: sticky;
   top: 120px;
   align-self: start;
-  backdrop-filter: none; /* Disable glass effect */
-  z-index: 5;
+  backdrop-filter: none;
+  z-index: 10;
 }
 
 .terminal {
