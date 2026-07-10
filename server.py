@@ -368,10 +368,12 @@ def send_global_command(req: GlobalCommandRequest):
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
     
     try:
-        # Robots listen on 5000 + agent_id
-        for port in range(5000, 5020):
-            sock.sendto(req.command.encode('utf-8'), ('255.255.255.255', port))
-            time.sleep(0.05)
+        # Send command 3 times to ensure delivery over unreliable UDP
+        for attempt in range(3):
+            for port in range(5000, 5020):
+                sock.sendto(req.command.encode('utf-8'), ('255.255.255.255', port))
+                time.sleep(0.01)  # 10ms between individual robots
+            time.sleep(0.1)       # 100ms between retries
         return {"status": "success", "command": req.command}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
