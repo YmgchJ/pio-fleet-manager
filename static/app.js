@@ -177,6 +177,29 @@ async function loadFleet(silent = false) {
             newHtml.appendChild(card);
         });
         
+        // Update the Latest Memos panel in the sidebar
+        const memosPanel = document.getElementById('latest-memos-list');
+        if (memosPanel) {
+            if (Object.keys(latestMemos).length === 0) {
+                memosPanel.innerHTML = '<div style="text-align: center; padding: 1rem;">まだ記録がありません</div>';
+            } else {
+                let memosHtml = '';
+                // Sort keys numerically
+                const sortedIds = Object.keys(latestMemos).sort((a,b) => parseInt(a) - parseInt(b));
+                sortedIds.forEach(id => {
+                    memosHtml += `
+                        <div style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05); padding: 0.5rem; border-radius: 6px;">
+                            <div style="display: flex; justify-content: space-between; margin-bottom: 0.2rem;">
+                                <span style="color: #60a5fa; font-weight: bold;">#${id}</span>
+                            </div>
+                            <div style="color: #fbbf24;">${latestMemos[id]}</div>
+                        </div>
+                    `;
+                });
+                memosPanel.innerHTML = memosHtml;
+            }
+        }
+        
         list.innerHTML = newHtml.innerHTML;
         document.getElementById('global-fleet-status').innerHTML = miniStatusHtml;
     } catch (err) {
