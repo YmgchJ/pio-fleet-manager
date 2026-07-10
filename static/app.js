@@ -35,12 +35,25 @@ async function loadFleet(silent = false) {
     }
     
     try {
-        const [fleetRes, usbRes] = await Promise.all([
+        const [fleetRes, usbRes, recordsRes] = await Promise.all([
             fetch('/api/fleet'),
-            fetch('/api/fleet/usb_devices')
+            fetch('/api/fleet/usb_devices'),
+            fetch('/api/records').catch(() => null)
         ]);
         const data = await fleetRes.json();
         const usbData = await usbRes.json();
+        
+        let latestMemos = {};
+        if (recordsRes && recordsRes.ok) {
+            const recordsData = await recordsRes.json();
+            if (recordsData && recordsData.records) {
+                // Assuming chronologically ordered, the last one seen is the latest
+                recordsData.records.forEach(r => {
+                    latestMemos[parseInt(r.robot_id)] = r.memo;
+                });
+            }
+        }
+        
         const usbUids = usbData.usb_uids || [];
         
         const newHtml = document.createElement('div');
@@ -118,8 +131,11 @@ async function loadFleet(silent = false) {
 
             card.innerHTML = `
                 <div class="device-info" style="display: flex; justify-content: space-between; align-items: flex-start;">
-                    <div>
-                        <h3 style="margin: 0 0 0.4rem 0; font-size: 1.1rem;">ID: ${agent.id} | ${agent.hostname}</h3>
+                    <div style="flex: 1; min-width: 0; padding-right: 1rem;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin: 0 0 0.4rem 0;">
+                            <h3 style="margin: 0; font-size: 1.1rem; white-space: nowrap;">ID: ${agent.id} | ${agent.hostname}</h3>
+                            ${latestMemos[agent.id] ? `<span style="font-size: 0.9rem; color: #fbbf24; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: right; margin-left: 1rem;">${latestMemos[agent.id]}</span>` : ''}
+                        </div>
                         <div style="font-size: 0.85rem; color: var(--text-muted); line-height: 1.4;">
                             <div>UID: ${agent.uid}</div>
                             <div>IP: ${hasIp ? agent.ip : 'Not Assigned'}</div>
