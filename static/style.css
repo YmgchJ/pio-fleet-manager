@@ -217,8 +217,9 @@ h2 {
   background: #111827;
   border: 1px solid var(--border-light);
   position: sticky;
-  top: 120px;
+  top: 180px;
   align-self: start;
+  width: 100%;
   backdrop-filter: none;
   z-index: 10;
 }
