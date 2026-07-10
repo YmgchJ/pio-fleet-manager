@@ -188,7 +188,7 @@ async function loadFleet(silent = false) {
                 const sortedIds = Object.keys(latestMemos).sort((a,b) => parseInt(a) - parseInt(b));
                 sortedIds.forEach(id => {
                     memosHtml += `
-                        <div style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.05); padding: 0.5rem; border-radius: 6px;">
+                        <div style="background: #111827; border: 1px solid rgba(255,255,255,0.05); padding: 0.5rem; border-radius: 6px;">
                             <div style="display: flex; justify-content: space-between; margin-bottom: 0.2rem;">
                                 <span style="color: #60a5fa; font-weight: bold;">#${id}</span>
                             </div>
