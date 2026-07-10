@@ -371,6 +371,7 @@ def send_global_command(req: GlobalCommandRequest):
         # Robots listen on 5000 + agent_id
         for port in range(5000, 5020):
             sock.sendto(req.command.encode('utf-8'), ('255.255.255.255', port))
+            time.sleep(0.05)
         return {"status": "success", "command": req.command}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
