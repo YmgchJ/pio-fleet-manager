@@ -479,16 +479,26 @@ async def websocket_upload(websocket: WebSocket):
                     cwd=FIRMWARE_DIR
                 )
                 
-                while True:
-                    line = await process.stdout.readline()
-                    if not line:
-                        break
-                    await websocket.send_text(line.decode('utf-8', errors='ignore'))
-                    
-                await process.wait()
-                if process.returncode != 0:
+                try:
+                    while True:
+                        # 30秒間出力がなければタイムアウトとして強制終了
+                        line = await asyncio.wait_for(process.stdout.readline(), timeout=30.0)
+                        if not line:
+                            break
+                        await websocket.send_text(line.decode('utf-8', errors='ignore'))
+                        
+                    await asyncio.wait_for(process.wait(), timeout=10.0)
+                except asyncio.TimeoutError:
+                    await websocket.send_text(f"\n❌ [TIMEOUT] 通信タイムアウト ({ip})。プロセスを終了し次へ進みます...\n")
+                    try:
+                        process.kill()
+                        await process.wait()
+                    except Exception:
+                        pass
+                
+                if process.returncode != 0 and process.returncode is not None:
                     await websocket.send_text(f"\n❌ [ERROR] Failed on {ip}. Continuing to next...\n")
-                else:
+                elif process.returncode == 0:
                     await websocket.send_text(f"\n✅ [SUCCESS] Finished {ip}.\n")
             
             await websocket.send_text("\n[WS] Batch upload completely finished!\n")
