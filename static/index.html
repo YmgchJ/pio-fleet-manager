@@ -89,14 +89,13 @@
             <!-- Discovery Panel -->
             <div class="glass-panel">
                 <h2>
-                    <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
                     【新規のみ】デバイス検出と初期登録 (Scan)
                 </h2>
                 <div style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 1rem; background: rgba(255,255,255,0.05); padding: 0.75rem; border-radius: 8px; border-left: 3px solid #3b82f6;">
                     <p style="margin: 0 0 0.5rem 0;">※ ここは<strong>【未登録の新品】専用</strong>です。登録済み機体は下部リストから更新してください。</p>
                     
                     <details>
-                        <summary style="cursor: pointer; color: #3b82f6; font-weight: bold; outline: none; user-select: none;">📝 詳しい登録手順（クリックで展開）</summary>
+                        <summary style="cursor: pointer; color: #3b82f6; font-weight: bold; outline: none; user-select: none;">詳しい登録手順（クリックで展開）</summary>
                         <div style="margin-top: 0.5rem; padding: 0.75rem; background: rgba(0,0,0,0.2); border-radius: 6px; line-height: 1.5;">
                             <p style="margin: 0 0 0.5rem 0;"><strong>【STEP 1】初期プログラムの書き込み</strong><br>
                             工場出荷時の新品基板は、PCからの自動再起動命令を受け取れません。<strong>最初の1回目だけは、基板上の白いボタン(BOOTSEL)を押しながらUSBを繋ぎ</strong>、すぐ下の「未登録基板へ強制書き込み」を押してください。</p>
@@ -132,10 +131,10 @@
             <div class="glass-panel">
                 <h2>システム管理</h2>
                 <button class="btn" style="width: 100%; margin-bottom: 0.5rem; background: transparent; border: 1px solid var(--text-muted); color: var(--text-main);" onclick="startUpload('build', 'auto')">
-                    ✓ コンパイルテスト (書き込まずにエラーチェック)
+                    コンパイルテスト (書き込まずにエラーチェック)
                 </button>
                 <button class="btn" style="width: 100%; margin-bottom: 0.5rem;" onclick="loadFleet()">
-                    ↻ 台帳を更新
+                    台帳を更新
                 </button>
             </div>
 
@@ -248,7 +247,7 @@
         <div style="display: flex; flex-direction: column; gap: 2rem; max-width: 800px; margin: 0 auto; width: 100%;">
             
             <div class="glass-panel">
-                <h2>📝 新規メモを記録</h2>
+                <h2>新規メモを記録</h2>
                 <div style="display: flex; gap: 1rem; align-items: flex-start; margin-bottom: 1rem;">
                     <div class="form-group" style="width: 150px; margin-bottom: 0;">
                         <label>ロボット番号</label>
@@ -268,7 +267,7 @@
             </div>
 
             <div class="glass-panel">
-                <h2>📋 記録履歴</h2>
+                <h2>記録履歴</h2>
                 <div style="overflow-x: auto;">
                     <table style="width: 100%; border-collapse: collapse; text-align: left;">
                         <thead>
