@@ -131,10 +131,9 @@ async function loadFleet(silent = false) {
 
             card.innerHTML = `
                 <div class="device-info" style="display: flex; justify-content: space-between; align-items: flex-start;">
-                    <div style="flex: 1; min-width: 0; padding-right: 1rem;">
+                    <div>
                         <div style="display: flex; justify-content: space-between; align-items: center; margin: 0 0 0.4rem 0;">
                             <h3 style="margin: 0; font-size: 1.1rem; white-space: nowrap;">ID: ${agent.id} | ${agent.hostname}</h3>
-                            ${latestMemos[agent.id] ? `<span style="font-size: 0.75rem; color: #fbbf24; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: right; margin-left: 1rem;">${latestMemos[agent.id]}</span>` : ''}
                         </div>
                         <div style="font-size: 0.85rem; color: var(--text-muted); line-height: 1.4;">
                             <div>UID: ${agent.uid}</div>

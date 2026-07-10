@@ -212,12 +212,8 @@ h2 {
 .terminal-section {
   background: #111827;
   border: 1px solid var(--border-light);
-  position: sticky;
-  top: 180px;
-  align-self: start;
   width: 100%;
   backdrop-filter: none;
-  z-index: 10;
 }
 
 .terminal {
