@@ -74,7 +74,7 @@
         <!-- Right Column: Discovery & Tools -->
         <div style="display: flex; flex-direction: column; gap: 2rem;">
             
-            <!-- Sticky Wrapper for Terminal and Memos -->
+            <!-- Sticky Wrapper for Terminal -->
             <div style="position: sticky; top: 180px; display: flex; flex-direction: column; gap: 2rem; z-index: 10;">
                 <!-- Terminal output -->
                 <div class="glass-panel terminal-section" style="display: flex; flex-direction: column; margin: 0;">
@@ -87,14 +87,14 @@
                         <div class="terminal-line" style="color: #8b92a5;">待機中...</div>
                     </div>
                 </div>
+            </div>
 
-                <!-- Latest Memos Panel -->
-                <div class="glass-panel" style="margin: 0; max-height: 300px; display: flex; flex-direction: column;">
-                    <h2>最新のメモ</h2>
-                    <div id="latest-memos-list" style="flex: 1; overflow-y: auto; font-size: 0.85rem; color: var(--text-muted);">
-                        <!-- JS will populate -->
-                        <div style="text-align: center; padding: 1rem;">読込中...</div>
-                    </div>
+            <!-- Latest Memos Panel (Not sticky) -->
+            <div class="glass-panel" style="margin: 0; max-height: 300px; display: flex; flex-direction: column;">
+                <h2>最新のメモ</h2>
+                <div id="latest-memos-list" style="flex: 1; overflow-y: auto; font-size: 0.85rem; color: var(--text-muted);">
+                    <!-- JS will populate -->
+                    <div style="text-align: center; padding: 1rem;">読込中...</div>
                 </div>
             </div>
 
