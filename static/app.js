@@ -10,8 +10,8 @@ document.addEventListener('DOMContentLoaded', () => {
             const data = await res.json();
             
             // Filter online agents with a valid IP
-            const onlineIps = Object.values(data)
-                .filter(agent => agent.is_online && agent.ip)
+            const onlineIps = (data.agents || [])
+                .filter(agent => agent.status === 'online' && agent.ip)
                 .map(agent => agent.ip);
                 
             if (onlineIps.length === 0) {
