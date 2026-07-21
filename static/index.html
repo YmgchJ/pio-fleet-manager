@@ -21,6 +21,21 @@
                 </a>
             </div>
             
+            <!-- Firmware Selection -->
+            <div style="display: flex; align-items: center; gap: 0.5rem; background: rgba(0,0,0,0.3); padding: 0.4rem 1rem; border-radius: 8px; border: 1px solid var(--border-light); flex-wrap: wrap;">
+                <label for="firmware-select" style="font-size: 0.85rem; color: var(--text-muted);">ファームウェア:</label>
+                <select id="firmware-select" style="background: var(--bg-dark); color: #fff; border: 1px solid var(--border-light); border-radius: 4px; padding: 0.2rem 0.5rem; font-size: 0.85rem;">
+                    <option value="pico_robot">pico_robot</option>
+                </select>
+                <span style="color: var(--border-light);">|</span>
+                <label for="wifi-ssid" style="font-size: 0.85rem; color: var(--text-muted);">Wi-Fi:</label>
+                <input id="wifi-ssid" type="text" placeholder="SSID" autocomplete="off"
+                    style="width: 120px; background: var(--bg-dark); color: #fff; border: 1px solid var(--border-light); border-radius: 4px; padding: 0.2rem 0.5rem; font-size: 0.85rem;">
+                <input id="wifi-password" type="password" placeholder="Password" autocomplete="off"
+                    style="width: 100px; background: var(--bg-dark); color: #fff; border: 1px solid var(--border-light); border-radius: 4px; padding: 0.2rem 0.5rem; font-size: 0.85rem;">
+                <button type="button" id="btn-save-wifi" class="btn btn-outline" style="padding: 0.2rem 0.6rem; font-size: 0.8rem;">保存</button>
+            </div>
+            
             <!-- Global Upload Status -->
             <div id="upload-progress-container" style="display: flex; align-items: center; gap: 1rem; background: rgba(0,0,0,0.3); padding: 0.4rem 1rem; border-radius: 8px; border: 1px solid var(--border-light); width: 350px;">
                 <div style="font-size: 0.8rem; font-weight: bold; width: 90px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" id="upload-status-text">待機中...</div>
@@ -29,6 +44,11 @@
                 </div>
                 <div style="font-size: 0.8rem; width: 35px; text-align: right;" id="upload-percent">0%</div>
             </div>
+        </div>
+
+        <!-- Wi-Fi save status (full width — easy to spot) -->
+        <div id="wifi-status-bar" style="display: none; width: 100%; padding: 0.55rem 1rem; border-radius: 8px; font-size: 0.9rem; box-sizing: border-box;">
+            <span id="wifi-config-status"></span>
         </div>
 
         <!-- Mini Fleet Connection Status (Sticky row) -->
@@ -303,7 +323,7 @@
     </div>
 
     <!-- Scripts -->
-    <script src="/static/app.js"></script>
+    <script src="/static/app.js?v=20260716b"></script>
     <script>
         function switchTab(tabId) {
             document.getElementById('tab-fleet').style.display = tabId === 'fleet' ? 'grid' : 'none';

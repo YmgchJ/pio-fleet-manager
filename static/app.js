@@ -1,6 +1,13 @@
 document.addEventListener('DOMContentLoaded', () => {
+    loadFirmwares();
     loadFleet();
     loadPorts();
+    loadWifiConfig();
+
+    const saveWifiBtn = document.getElementById('btn-save-wifi');
+    if (saveWifiBtn) {
+        saveWifiBtn.addEventListener('click', saveWifiConfig);
+    }
     
     document.getElementById('btn-batch-ota').addEventListener('click', async () => {
         if (!confirm("オンラインの全機体に一括でOTA書き込みを開始しますか？（順番に処理されます）")) return;
@@ -26,6 +33,142 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
 });
+
+function setWifiStatus(text, kind = 'muted') {
+    const statusEl = document.getElementById('wifi-config-status');
+    const barEl = document.getElementById('wifi-status-bar');
+    if (!statusEl) return;
+    const colors = {
+        ok: '#34d399',
+        warn: '#fbbf24',
+        err: '#f87171',
+        muted: '#94a3b8',
+        busy: '#60a5fa',
+    };
+    const backgrounds = {
+        ok: 'rgba(52, 211, 153, 0.12)',
+        warn: 'rgba(251, 191, 36, 0.12)',
+        err: 'rgba(248, 113, 113, 0.12)',
+        busy: 'rgba(96, 165, 250, 0.12)',
+        muted: 'rgba(148, 163, 184, 0.08)',
+    };
+    const borders = {
+        ok: '1px solid rgba(52, 211, 153, 0.45)',
+        warn: '1px solid rgba(251, 191, 36, 0.45)',
+        err: '1px solid rgba(248, 113, 113, 0.45)',
+        busy: '1px solid rgba(96, 165, 250, 0.45)',
+        muted: '1px solid rgba(148, 163, 184, 0.25)',
+    };
+    statusEl.textContent = text;
+    statusEl.style.color = colors[kind] || colors.muted;
+    statusEl.style.fontWeight = kind === 'ok' ? '600' : 'normal';
+    if (barEl) {
+        barEl.style.display = text ? 'block' : 'none';
+        barEl.style.background = backgrounds[kind] || backgrounds.muted;
+        barEl.style.border = borders[kind] || borders.muted;
+    }
+}
+
+async function loadWifiConfig() {
+    const ssidEl = document.getElementById('wifi-ssid');
+    const passEl = document.getElementById('wifi-password');
+    if (!ssidEl) {
+        setWifiStatus('Wi-Fi 設定 UI が見つかりません — ページを強制再読込 (Cmd+Shift+R)', 'err');
+        return;
+    }
+    setWifiStatus('Wi-Fi 設定を読込中…', 'busy');
+    try {
+        const res = await fetch('/api/fleet/wifi_config');
+        if (!res.ok) {
+            setWifiStatus('API 未対応 — Fleet Manager を再起動', 'warn');
+            return;
+        }
+        const data = await res.json();
+        ssidEl.value = data.ssid || '';
+        passEl.value = data.password || '';
+        if (data.source === 'saved') {
+            const when = data.saved_at ? ` (${data.saved_at})` : '';
+            setWifiStatus(`✓ 保存済: ${data.ssid}${when}`, 'ok');
+        } else if (data.source === 'pico_robot') {
+            setWifiStatus(`読込のみ: ${data.ssid} — 保存を押してください`, 'warn');
+        } else {
+            setWifiStatus('未設定 — SSID/パスワードを入力して保存', 'warn');
+        }
+    } catch (e) {
+        console.error('Failed to load WiFi config:', e);
+        setWifiStatus('読込失敗', 'err');
+    }
+}
+
+async function saveWifiConfig() {
+    const btn = document.getElementById('btn-save-wifi');
+    const ssid = document.getElementById('wifi-ssid')?.value?.trim();
+    const password = document.getElementById('wifi-password')?.value ?? '';
+    if (!ssid) {
+        setWifiStatus('SSID を入力してください', 'warn');
+        return;
+    }
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = '保存中…';
+    }
+    setWifiStatus('保存中…', 'busy');
+    try {
+        const res = await fetch('/api/fleet/wifi_config', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ssid, password }),
+        });
+        if (!res.ok) {
+            let detail = `HTTP ${res.status}`;
+            try {
+                const err = await res.json();
+                detail = err.detail || detail;
+            } catch (_) {}
+            if (res.status === 404 || res.status === 405) {
+                detail = 'API 未対応 — ./start_dashboard.sh で再起動してください';
+            }
+            throw new Error(detail);
+        }
+        const data = await res.json();
+        const when = data.saved_at ? ` (${data.saved_at})` : '';
+        setWifiStatus(`✓ 保存しました: ${data.ssid}${when}`, 'ok');
+    } catch (e) {
+        setWifiStatus(`✗ 保存失敗: ${e.message}`, 'err');
+    } finally {
+        if (btn) {
+            btn.disabled = false;
+            btn.textContent = '保存';
+        }
+    }
+}
+
+function getWifiPayload() {
+    const ssid = document.getElementById('wifi-ssid')?.value?.trim() || '';
+    const password = document.getElementById('wifi-password')?.value ?? '';
+    return { wifi_ssid: ssid, wifi_password: password };
+}
+
+async function loadFirmwares() {
+    try {
+        const res = await fetch('/api/fleet/firmwares');
+        const data = await res.json();
+        const select = document.getElementById('firmware-select');
+        if (select && data.firmwares) {
+            select.innerHTML = '';
+            data.firmwares.forEach(fw => {
+                const option = document.createElement('option');
+                option.value = fw;
+                option.textContent = fw;
+                // Auto-select pico_robot if present
+                if (fw === 'pico_robot') option.selected = true;
+                select.appendChild(option);
+            });
+        }
+    } catch (e) {
+        console.error('Failed to load firmwares:', e);
+    }
+}
 
 // Load fleet registry
 async function loadFleet(silent = false) {
@@ -470,7 +613,9 @@ function startUpload(target, value) {
     
     ws.onopen = () => {
         logToTerminal('WebSocket connected! Sending data...');
-        ws.send(JSON.stringify({ target, value }));
+        const fwSelect = document.getElementById('firmware-select');
+        const firmware = fwSelect ? fwSelect.value : 'pico_robot';
+        ws.send(JSON.stringify({ target, value, firmware, ...getWifiPayload() }));
         logToTerminal('Data sent.');
     };
     

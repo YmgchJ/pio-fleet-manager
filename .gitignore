@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.DS_Store
+data/wifi_config.json
+data/experiments/
+data/merged_chunks/

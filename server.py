@@ -18,8 +18,14 @@ import serial
 from pydantic import BaseModel
 import contextlib
 
-# --- UDP Auto-Discovery ---
+import shutil
+
+from log_receiver import LogReceiver, MERGED_CHUNKS_DIR, SAVED_CHUNKS_DIR, EXPERIMENTS_DIR
+from wifi_config_store import inject_for_firmware, import_from_pico_robot, load_saved, save as save_wifi_config
+
+# --- UDP Auto-Discovery + high-rate log receiver ---
 agent_live_state = {}
+log_receiver = LogReceiver()
 
 def update_agent_ip(agent_id: int, ip_address: str):
     if not AGENTS_YAML_PATH.exists():
@@ -58,10 +64,52 @@ def broadcast_telemetry(data_dict: dict):
         # We need to send it asynchronously
         asyncio.run_coroutine_threadsafe(ws.send_text(message), loop)
 
+RECORD_SIZE_V6 = 6
+RECORD_SIZE_V7 = 7  # Volvocine compressed log record: micros24(3) + a0 + a1 + a2
+
+
+def is_binary_log_packet(data: bytes) -> bool:
+    """True only for Volvocine RAM log UDP packets, not STATUS/HELLO text."""
+    if len(data) < 11:  # 5-byte header + at least one 6-byte record
+        return False
+    # Text telemetry / handshakes (STATUS starts with 'S' = 0x53, in 1..99 range)
+    if data.startswith((b"STATUS,", b"HELLO", b"REQUEST")):
+        return False
+    if data[0] < 128 and chr(data[0]).isalpha():
+        return False
+    agent_id = data[0]
+    if agent_id == 0 or agent_id > 99:
+        return False
+    payload = data[5:]
+    if len(payload) == 0:
+        return False
+    return (len(payload) % RECORD_SIZE_V7 == 0) or (len(payload) % RECORD_SIZE_V6 == 0)
+
+
 class UdpDiscoveryProtocol(asyncio.DatagramProtocol):
+    def connection_made(self, transport):
+        self.transport = transport
+
     def datagram_received(self, data: bytes, addr: tuple):
+        # Volvocine compressed log: [agent_id:1][send_micros:4][records:6*n]
+        if is_binary_log_packet(data):
+            ack = log_receiver.handle_datagram(data, addr, self.transport)
+            if ack is not None and hasattr(self, "transport"):
+                self.transport.sendto(ack, addr)
+            return
+
         try:
             msg = data.decode('utf-8')
+            if msg.startswith("LOG_END,"):
+                id_m = re.search(r"id:(\d+)", msg)
+                rec_m = re.search(r"records:(\d+)", msg)
+                ok_m = re.search(r"ok:([01])", msg)
+                if id_m:
+                    agent_id = int(id_m.group(1))
+                    records = int(rec_m.group(1)) if rec_m else 0
+                    ok = ok_m.group(1) == "1" if ok_m else False
+                    log_receiver.handle_log_end(agent_id, records, ok)
+                return
             if msg.startswith("STATUS,id:"):
                 # STATUS,id:1,paused:0,angle:110.0,flex:1024,light:512,current:256,volt:3.70
                 match = re.search(r"id:(\d+)", msg)
@@ -100,6 +148,14 @@ async def discovery_loop(transport):
             pass
         await asyncio.sleep(2.0)
 
+async def chunk_timeout_loop():
+    while True:
+        try:
+            log_receiver.check_timeouts()
+        except Exception as e:
+            print(f"[Chunk] timeout check error: {e}")
+        await asyncio.sleep(1.0)
+
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
     loop = asyncio.get_running_loop()
@@ -119,7 +175,9 @@ async def lifespan(app: FastAPI):
     print("[Auto-Discovery] UDP listener started on 0.0.0.0:5000 with SO_BROADCAST")
     
     discovery_task = asyncio.create_task(discovery_loop(transport))
+    chunk_task = asyncio.create_task(chunk_timeout_loop())
     yield
+    chunk_task.cancel()
     discovery_task.cancel()
     transport.close()
     sock.close()
@@ -137,8 +195,10 @@ app.add_middleware(
 
 # --- CONFIGURATION (Environment Variables) ---
 FLEET_MANAGER_ROOT = Path(__file__).resolve().parent
-# FIRMWARE_DIR points to your PlatformIO project directory
-FIRMWARE_DIR = Path(os.environ.get("PIO_FIRMWARE_DIR", os.getcwd()))
+# FIRMWARE_ROOT_DIR points to the parent directory containing PIO projects (e.g. firmware/)
+FIRMWARE_ROOT_DIR = Path(os.environ.get("PIO_FIRMWARE_ROOT_DIR", FLEET_MANAGER_ROOT.parent / "firmware"))
+# FIRMWARE_DIR points to the default PlatformIO project directory (legacy fallback)
+FIRMWARE_DIR = Path(os.environ.get("PIO_FIRMWARE_DIR", FIRMWARE_ROOT_DIR / "pico_robot"))
 # AGENTS_YAML_PATH is where the fleet registry is saved
 AGENTS_YAML_PATH = Path(os.environ.get("PIO_AGENTS_PATH", FLEET_MANAGER_ROOT / "agents.yaml"))
 # RECORDS_CSV_PATH is where the robot memos/records are saved
@@ -181,6 +241,10 @@ class TestServoUsbRequest(BaseModel):
 class GlobalCommandRequest(BaseModel):
     command: str  # "START" or "STOP"
 
+class WiFiConfigRequest(BaseModel):
+    ssid: str
+    password: str = ""
+
 # --- Endpoints ---
 
 @app.get("/api/ports")
@@ -202,6 +266,45 @@ def get_usb_devices():
         if "usbmodem" in p.device and p.serial_number:
             uids.append(p.serial_number.upper())
     return {"usb_uids": uids}
+
+@app.get("/api/fleet/firmwares")
+def get_firmwares():
+    """Scans FIRMWARE_ROOT_DIR for PlatformIO projects."""
+    firmwares = []
+    if FIRMWARE_ROOT_DIR.exists() and FIRMWARE_ROOT_DIR.is_dir():
+        for item in FIRMWARE_ROOT_DIR.iterdir():
+            if item.is_dir() and (item / "platformio.ini").exists():
+                firmwares.append(item.name)
+    return {"firmwares": sorted(firmwares)}
+
+@app.get("/api/fleet/wifi_config")
+def get_wifi_config():
+    """SSID/password for UI prefill. Falls back to pico_robot/include/wifi_config.local.h."""
+    saved = load_saved()
+    if saved:
+        return {
+            "ssid": saved["ssid"],
+            "password": saved["password"],
+            "source": "saved",
+            "saved_at": saved.get("saved_at"),
+        }
+    imported = import_from_pico_robot(FIRMWARE_ROOT_DIR)
+    if imported:
+        return {"ssid": imported["ssid"], "password": imported["password"], "source": "pico_robot"}
+    return {"ssid": "", "password": "", "source": "empty"}
+
+@app.put("/api/fleet/wifi_config")
+def put_wifi_config(req: WiFiConfigRequest):
+    ssid = req.ssid.strip()
+    if not ssid:
+        raise HTTPException(status_code=400, detail="SSID is required")
+    save_wifi_config(ssid, req.password)
+    saved = load_saved()
+    return {
+        "status": "success",
+        "ssid": ssid,
+        "saved_at": saved.get("saved_at") if saved else None,
+    }
 
 @app.get("/api/discover")
 def discover_device(port: str):
@@ -444,65 +547,93 @@ async def websocket_upload(websocket: WebSocket):
     print("[WS] Upload connection requested")
     await websocket.accept()
     print("[WS] Connection accepted")
-    
+
+    last_returncode = 1
     try:
         data = await websocket.receive_json()
-        print(f"[WS] Received data: {data}")
-        target = data.get("target") # "ota", "usb", or "ota_batch"
+        log_data = {**data}
+        if log_data.get("wifi_password"):
+            log_data["wifi_password"] = "***"
+        print(f"[WS] Received data: {log_data}")
+        target = data.get("target")  # "ota", "usb", "ota_batch", or "build"
         port_or_ip = data.get("value")
-        
+        firmware_name = data.get("firmware", "pico_robot")
+        wifi_ssid = data.get("wifi_ssid")
+        wifi_password = data.get("wifi_password")
+
+        cwd_dir = FIRMWARE_ROOT_DIR / firmware_name
+        if not cwd_dir.exists() or not cwd_dir.is_dir():
+            cwd_dir = FIRMWARE_DIR
+
         if not port_or_ip:
             print("[WS] Error: No port or IP")
             await websocket.send_text("ERROR: No port or IP specified\n")
             await websocket.close()
             return
-            
-        import shutil
+
+        try:
+            header_path, ssid_used = inject_for_firmware(
+                FIRMWARE_ROOT_DIR, firmware_name, wifi_ssid, wifi_password
+            )
+            await websocket.send_text(
+                f"[WiFi] Wrote {header_path.name} for '{firmware_name}' (SSID: {ssid_used})\n"
+            )
+        except ValueError as e:
+            await websocket.send_text(f"ERROR: {e}\n")
+            await websocket.close()
+            return
+
         pio_path = shutil.which("pio")
         if not pio_path:
             pio_path = "/opt/homebrew/bin/pio"
-            
+
         if target == "ota_batch":
             ips = port_or_ip.split(",")
-            await websocket.send_text(f"[WS] Starting batch OTA for {len(ips)} devices...\n")
-            
+            await websocket.send_text(
+                f"[WS] Starting batch OTA for {len(ips)} devices using firmware '{firmware_name}'...\n"
+            )
+            batch_ok = True
+
             for i, ip in enumerate(ips):
                 await websocket.send_text(f"\n{'='*40}\n")
                 await websocket.send_text(f"[WS] Batch {i+1}/{len(ips)}: Uploading to {ip} ...\n")
                 await websocket.send_text(f"{'='*40}\n\n")
-                
+
                 cmd = [pio_path, "run", "-e", "ota", "-t", "upload", "--upload-port", ip.strip()]
                 process = await asyncio.create_subprocess_exec(
                     *cmd,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT,
-                    cwd=FIRMWARE_DIR
+                    cwd=cwd_dir,
                 )
-                
+
                 try:
                     while True:
-                        # 30秒間出力がなければタイムアウトとして強制終了
                         line = await asyncio.wait_for(process.stdout.readline(), timeout=30.0)
                         if not line:
                             break
-                        await websocket.send_text(line.decode('utf-8', errors='ignore'))
-                        
+                        await websocket.send_text(line.decode("utf-8", errors="ignore"))
                     await asyncio.wait_for(process.wait(), timeout=10.0)
                 except asyncio.TimeoutError:
-                    await websocket.send_text(f"\n❌ [TIMEOUT] 通信タイムアウト ({ip})。プロセスを終了し次へ進みます...\n")
+                    batch_ok = False
+                    await websocket.send_text(
+                        f"\n❌ [TIMEOUT] 通信タイムアウト ({ip})。プロセスを終了し次へ進みます...\n"
+                    )
                     try:
                         process.kill()
                         await process.wait()
                     except Exception:
                         pass
-                
+
                 if process.returncode != 0 and process.returncode is not None:
+                    batch_ok = False
                     await websocket.send_text(f"\n❌ [ERROR] Failed on {ip}. Continuing to next...\n")
                 elif process.returncode == 0:
                     await websocket.send_text(f"\n✅ [SUCCESS] Finished {ip}.\n")
-            
+
+            last_returncode = 0 if batch_ok else 1
             await websocket.send_text("\n[WS] Batch upload completely finished!\n")
-            print(f"[WS] Batch Subprocess finished")
+            print("[WS] Batch Subprocess finished")
 
         else:
             if target == "build":
@@ -513,34 +644,37 @@ async def websocket_upload(websocket: WebSocket):
                 cmd = [pio_path, "run", "-t", "upload"]
                 if port_or_ip != "auto":
                     cmd.extend(["--upload-port", port_or_ip])
-            
+
             print(f"[WS] Command ready: {cmd}")
-            await websocket.send_text(f"Starting upload process...\nCommand: {' '.join(cmd)}\n")
+            await websocket.send_text(
+                f"Starting upload process using firmware '{firmware_name}'...\nCommand: {' '.join(cmd)}\n"
+            )
             await websocket.send_text("-" * 40 + "\n")
-            
-            print(f"[WS] Launching subprocess in {FIRMWARE_DIR}")
+
+            print(f"[WS] Launching subprocess in {cwd_dir}")
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
-                cwd=FIRMWARE_DIR
+                cwd=cwd_dir,
             )
             print(f"[WS] Subprocess launched, PID: {process.pid}")
-            
+
             while True:
                 line = await process.stdout.readline()
                 if not line:
                     break
-                await websocket.send_text(line.decode('utf-8', errors='ignore'))
-                
+                await websocket.send_text(line.decode("utf-8", errors="ignore"))
+
             await process.wait()
-            print(f"[WS] Subprocess finished with code {process.returncode}")
-        
-        if process.returncode == 0:
+            last_returncode = process.returncode if process.returncode is not None else 1
+            print(f"[WS] Subprocess finished with code {last_returncode}")
+
+        if last_returncode == 0:
             await websocket.send_text("\n✅ SUCCESS: Upload completed successfully!\n")
         else:
-            await websocket.send_text(f"\n❌ ERROR: Upload failed with code {process.returncode}\n")
-            
+            await websocket.send_text(f"\n❌ ERROR: Upload failed with code {last_returncode}\n")
+
     except WebSocketDisconnect:
         print("[WS] Client disconnected normally")
     except Exception as e:
@@ -549,7 +683,7 @@ async def websocket_upload(websocket: WebSocket):
             await websocket.send_text(f"\n❌ Internal Server Error: {e}\n")
         except Exception:
             pass
-        
+
     finally:
         print("[WS] Closing connection")
         try:
@@ -565,6 +699,39 @@ from pydantic import BaseModel
 class RecordRequest(BaseModel):
     robot_id: int
     memo: str
+
+@app.post("/api/chunks/merge")
+def merge_experiment_chunks():
+    """Flush buffered UDP logs and merge into one CSV (Volvocine-compatible columns)."""
+    log_receiver.flush_all()
+    merged = log_receiver.merge_pending()
+    if not merged:
+        raise HTTPException(status_code=404, detail="No chunk data to merge")
+    return {"merged_path": merged, "session": log_receiver.get_session_info()}
+
+@app.get("/api/chunks/session")
+def get_chunk_session():
+    return log_receiver.get_session_info()
+
+@app.get("/api/chunks/merged")
+def list_merged_chunks():
+    files: list[str] = []
+    if MERGED_CHUNKS_DIR.exists():
+        files.extend(
+            str(p)
+            for p in sorted(
+                MERGED_CHUNKS_DIR.glob("merged_*.csv"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+        )
+    if EXPERIMENTS_DIR.exists():
+        for exp_dir in sorted(EXPERIMENTS_DIR.iterdir(), reverse=True):
+            if not exp_dir.is_dir():
+                continue
+            for merged in exp_dir.glob("merged_*.csv"):
+                files.append(str(merged))
+    return {"files": files}
 
 @app.get("/api/records")
 def get_records():
