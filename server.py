@@ -5,12 +5,15 @@ import json
 import asyncio
 import subprocess
 import csv
+import math
+import tempfile
 from datetime import datetime
 from pathlib import Path
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import serial.tools.list_ports
 import socket
 import time
@@ -21,11 +24,20 @@ import contextlib
 import shutil
 
 from log_receiver import LogReceiver, MERGED_CHUNKS_DIR, SAVED_CHUNKS_DIR, EXPERIMENTS_DIR
+from sync_params import (
+    Z_MODES,
+    build_param_payload,
+    effective_prc_params,
+    invalidate_sync_params_cache,
+    parse_param_payload,
+)
+from experiment_sequence import ExperimentSequenceController, SequenceValidationError
 from wifi_config_store import inject_for_firmware, import_from_pico_robot, load_saved, save as save_wifi_config
 
 # --- UDP Auto-Discovery + high-rate log receiver ---
 agent_live_state = {}
 log_receiver = LogReceiver()
+sequence_controller: ExperimentSequenceController | None = None
 
 def update_agent_ip(agent_id: int, ip_address: str):
     if not AGENTS_YAML_PATH.exists():
@@ -86,6 +98,53 @@ def is_binary_log_packet(data: bytes) -> bool:
     return (len(payload) % RECORD_SIZE_V7 == 0) or (len(payload) % RECORD_SIZE_V6 == 0)
 
 
+def parse_status_message(msg: str, agent_id: int, ip_address: str) -> dict:
+    """Parse robot STATUS UDP line into a telemetry dict."""
+    telemetry: dict = {"id": agent_id, "ip": ip_address, "timestamp": time.time()}
+    for field in ["paused", "angle", "flex", "light", "current", "volt",
+                  "kappa", "omega", "params", "src", "zmode", "flex_used"]:
+        f_match = re.search(rf"{field}:([0-9.-]+)", msg)
+        if f_match:
+            telemetry[field] = float(f_match.group(1))
+    mode_match = re.search(r"(?:^|,)mode:([^,\s]+)", msg)
+    if mode_match:
+        telemetry["mode"] = mode_match.group(1)
+    fw_match = re.search(r"fw:([^,\s]+)", msg)
+    if fw_match:
+        telemetry["fw"] = fw_match.group(1)
+    return telemetry
+
+
+def parse_sequence_event(msg: str, ip_address: str) -> dict:
+    """Parse SEQ_EVENT key:value fields without losing string metadata."""
+    event: dict = {"ip": ip_address, "received_timestamp": time.time()}
+    for part in msg.split(",")[1:]:
+        if ":" not in part:
+            continue
+        key, value = part.split(":", 1)
+        key = key.strip()
+        value = value.strip()
+        if not key:
+            continue
+        if key in {"trial", "agent", "elapsed_ms", "feedback_start_ms", "duration_ms", "start_delay_ms",
+                   "zmode", "flex_used", "current_window", "sample_period_us", "ina_ready", "ina_ok",
+                   "ina_fail", "records", "upload_ok"}:
+            try:
+                event[key] = int(float(value))
+                continue
+            except ValueError:
+                pass
+        if key in {"phase_offset", "phase_diff_target", "kappa", "kappa_now", "omega",
+                   "feedback_tau", "servo_center", "servo_amplitude"}:
+            try:
+                event[key] = float(value)
+                continue
+            except ValueError:
+                pass
+        event[key] = value
+    return event
+
+
 class UdpDiscoveryProtocol(asyncio.DatagramProtocol):
     def connection_made(self, transport):
         self.transport = transport
@@ -100,15 +159,46 @@ class UdpDiscoveryProtocol(asyncio.DatagramProtocol):
 
         try:
             msg = data.decode('utf-8')
+            if msg.startswith("REQUEST_PARAMS"):
+                id_m = re.search(r"id:(\d+)", msg)
+                if id_m:
+                    agent_id = int(id_m.group(1))
+                    payload = build_param_payload(agent_id)
+                    if hasattr(self, "transport"):
+                        self.transport.sendto(payload.encode("utf-8"), addr)
+                        print(f"[PARAMS] agent={agent_id} -> {payload[:120]}...")
+                        log_receiver.record_params_served(
+                            agent_id, payload, parse_param_payload(payload)
+                        )
+                return
+            if msg.startswith("SEQ_EVENT,"):
+                id_m = re.search(r"(?:^|,)agent:(\d+)", msg)
+                if id_m:
+                    agent_id = int(id_m.group(1))
+                    event = parse_sequence_event(msg, addr[0])
+                    log_receiver.record_experiment_event(agent_id, event)
+                    if sequence_controller is not None:
+                        sequence_controller.handle_robot_event(agent_id, event)
+                return
             if msg.startswith("LOG_END,"):
                 id_m = re.search(r"id:(\d+)", msg)
                 rec_m = re.search(r"records:(\d+)", msg)
                 ok_m = re.search(r"ok:([01])", msg)
+                seq_m = re.search(r"seq:([^,\s]+)", msg)
+                trial_m = re.search(r"trial:(\d+)", msg)
                 if id_m:
                     agent_id = int(id_m.group(1))
                     records = int(rec_m.group(1)) if rec_m else 0
                     ok = ok_m.group(1) == "1" if ok_m else False
-                    log_receiver.handle_log_end(agent_id, records, ok)
+                    sequence_id = seq_m.group(1) if seq_m else None
+                    trial = int(trial_m.group(1)) if trial_m else None
+                    if sequence_controller is not None:
+                        # Update the sequence state before LogReceiver may merge
+                        # synchronously on the second LOG_END.
+                        sequence_controller.handle_log_end(
+                            agent_id, records, ok, sequence_id, trial
+                        )
+                    log_receiver.handle_log_end(agent_id, records, ok, sequence_id, trial)
                 return
             if msg.startswith("STATUS,id:"):
                 # STATUS,id:1,paused:0,angle:110.0,flex:1024,light:512,current:256,volt:3.70
@@ -117,22 +207,25 @@ class UdpDiscoveryProtocol(asyncio.DatagramProtocol):
                     agent_id = int(match.group(1))
                     ip_address = addr[0]
                     update_agent_ip(agent_id, ip_address)
-                    
-                    # Parse all fields
-                    telemetry = {"id": agent_id, "timestamp": time.time()}
-                    
-                    for field in ["paused", "angle", "flex", "light", "current", "volt"]:
-                        f_match = re.search(f"{field}:([0-9.-]+)", msg)
-                        if f_match:
-                            telemetry[field] = float(f_match.group(1))
-                    
+                    telemetry = parse_status_message(msg, agent_id, ip_address)
+                    log_receiver.record_status(agent_id, telemetry)
+
                     # Update live state for volt (dashboard use)
-                    if "volt" in telemetry:
-                        agent_live_state[agent_id] = {
-                            "volt": telemetry["volt"],
-                            "last_seen": telemetry["timestamp"]
-                        }
-                        
+                    agent_live_state[agent_id] = {
+                        "volt": telemetry.get("volt"),
+                        "paused": telemetry.get("paused"),
+                        "kappa": telemetry.get("kappa"),
+                        "omega": telemetry.get("omega"),
+                        "params": telemetry.get("params"),
+                        "src": telemetry.get("src"),
+                        "zmode": telemetry.get("zmode"),
+                        "flex_used": telemetry.get("flex_used"),
+                        "mode": telemetry.get("mode"),
+                        "fw": telemetry.get("fw"),
+                        "ip": ip_address,
+                        "last_seen": telemetry["timestamp"],
+                    }
+
                     broadcast_telemetry(telemetry)
         except Exception as e:
             print(f"[UDP Error] {e}")
@@ -158,6 +251,7 @@ async def chunk_timeout_loop():
 
 @contextlib.asynccontextmanager
 async def lifespan(app: FastAPI):
+    global sequence_controller
     loop = asyncio.get_running_loop()
     
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -173,16 +267,46 @@ async def lifespan(app: FastAPI):
         sock=sock
     )
     print("[Auto-Discovery] UDP listener started on 0.0.0.0:5000 with SO_BROADCAST")
+
+    sequence_config_path = Path(
+        os.environ.get(
+            "SEQUENCE_CONFIG_PATH",
+            str(FLEET_MANAGER_ROOT.parent / "fleet" / "current_phase_sequence.yaml"),
+        )
+    )
+    sequence_controller = ExperimentSequenceController(
+        config_path=sequence_config_path,
+        experiments_dir=EXPERIMENTS_DIR,
+        log_receiver=log_receiver,
+        target_provider=lambda agent_ids: [
+            a for a in _agents_with_ips(online_only=True) if int(a.get("id")) in agent_ids
+        ],
+    )
+    log_receiver.set_session_merged_callback(sequence_controller.handle_session_merged)
     
     discovery_task = asyncio.create_task(discovery_loop(transport))
     chunk_task = asyncio.create_task(chunk_timeout_loop())
-    yield
-    chunk_task.cancel()
-    discovery_task.cancel()
-    transport.close()
-    sock.close()
+    try:
+        yield
+    finally:
+        if sequence_controller is not None:
+            await sequence_controller.shutdown()
+        log_receiver.set_session_merged_callback(None)
+        sequence_controller = None
+        chunk_task.cancel()
+        discovery_task.cancel()
+        transport.close()
+        sock.close()
 
 app = FastAPI(title="Modular Robots Fleet Manager", lifespan=lifespan)
+
+
+@app.exception_handler(Exception)
+async def json_internal_error_handler(request: Request, exc: Exception):
+    if isinstance(exc, HTTPException):
+        raise exc
+    print(f"[HTTP 500] {request.method} {request.url.path}: {exc}", flush=True)
+    return JSONResponse(status_code=500, content={"detail": str(exc)})
 
 # CORS for local dev if needed
 app.add_middleware(
@@ -199,12 +323,73 @@ FLEET_MANAGER_ROOT = Path(__file__).resolve().parent
 FIRMWARE_ROOT_DIR = Path(os.environ.get("PIO_FIRMWARE_ROOT_DIR", FLEET_MANAGER_ROOT.parent / "firmware"))
 # FIRMWARE_DIR points to the default PlatformIO project directory (legacy fallback)
 FIRMWARE_DIR = Path(os.environ.get("PIO_FIRMWARE_DIR", FIRMWARE_ROOT_DIR / "pico_robot"))
-# AGENTS_YAML_PATH is where the fleet registry is saved
-AGENTS_YAML_PATH = Path(os.environ.get("PIO_AGENTS_PATH", FLEET_MANAGER_ROOT / "agents.yaml"))
+# AGENTS_YAML_PATH — canonical fleet registry lives in fleet/agents.yaml (see AGENTS.md)
+AGENTS_YAML_PATH = Path(os.environ.get("PIO_AGENTS_PATH", FLEET_MANAGER_ROOT.parent / "fleet" / "agents.yaml"))
 # RECORDS_CSV_PATH is where the robot memos/records are saved
 RECORDS_CSV_PATH = FLEET_MANAGER_ROOT / "data" / "records.csv"
 # Optional script to run after registration (e.g. to generate C++ headers)
 POST_REG_SCRIPT = os.environ.get("PIO_POST_REG_SCRIPT", None)
+SYNC_PARAMS_PATH = FLEET_MANAGER_ROOT.parent / "fleet" / "sync_experiment_params.yaml"
+DEFAULT_SEQUENCE_CONFIG_PATH = FLEET_MANAGER_ROOT.parent / "fleet" / "current_phase_sequence.yaml"
+
+
+def _sequence_config_path() -> Path:
+    if sequence_controller is not None:
+        return Path(sequence_controller.config_path)
+    return Path(os.environ.get("SEQUENCE_CONFIG_PATH", str(DEFAULT_SEQUENCE_CONFIG_PATH)))
+
+
+def _read_yaml_path(path: Path) -> dict:
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail=f"設定ファイルがありません: {path}")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        raise HTTPException(status_code=500, detail=f"設定を読めません: {exc}") from exc
+
+
+def _write_yaml_atomic(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", suffix=".tmp", delete=False
+        ) as f:
+            temp_path = Path(f.name)
+            yaml.safe_dump(data, f, allow_unicode=True, sort_keys=False, default_flow_style=False)
+        os.replace(temp_path, path)
+    except (OSError, yaml.YAMLError) as exc:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail=f"設定を保存できません: {exc}") from exc
+
+
+def _experiment_config_view(sequence: dict, sync: dict, sequence_path: Path) -> dict:
+    sequence_type = str(sequence.get("sequence_type", "phase_sweep")).lower()
+    trial_count = len(sequence.get("delta_omega_rad", []) or sequence.get("phase_differences_rad", []))
+    return {
+        "sequence_config_path": str(sequence_path),
+        "sync_params_path": str(SYNC_PARAMS_PATH),
+        "z_mode": str(sync.get("z_mode", "cos")).lower(),
+        "sequence_type": sequence_type,
+        "trial_count": trial_count,
+        "trial_duration_s": float(sequence.get("trial_duration_ms", 60000)) / 1000.0,
+        "kappa": float(sequence.get("kappa", sync.get("kappa", 5.0))),
+    }
+
+
+def _update_prc_mode(current_sync: dict, z_mode: str) -> dict:
+    z_mode = str(z_mode).lower().strip()
+    if z_mode not in Z_MODES:
+        raise HTTPException(status_code=400, detail="z_mode は cos / zsin / zopt のいずれかです")
+    sync = dict(current_sync)
+    sync["z_mode"] = z_mode
+    try:
+        effective_prc_params(sync)
+    except (FileNotFoundError, ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=f"PRC プロファイルを読めません: {exc}") from exc
+    return sync
 
 # Serve static files
 app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "static")), name="static")
@@ -244,6 +429,14 @@ class GlobalCommandRequest(BaseModel):
 class WiFiConfigRequest(BaseModel):
     ssid: str
     password: str = ""
+
+class PhaseSequenceStartRequest(BaseModel):
+    agent_ids: list[int] = [11, 12]
+
+
+class ExperimentConfigRequest(BaseModel):
+    """Web UI exposes PRC (z_mode) only; sequence YAML is edited offline."""
+    z_mode: str = "zopt"
 
 # --- Endpoints ---
 
@@ -306,6 +499,36 @@ def put_wifi_config(req: WiFiConfigRequest):
         "saved_at": saved.get("saved_at") if saved else None,
     }
 
+
+@app.get("/api/experiment/config")
+def get_experiment_config():
+    sequence_path = _sequence_config_path()
+    sequence = _read_yaml_path(sequence_path)
+    sync = _read_yaml_path(SYNC_PARAMS_PATH)
+    return _experiment_config_view(sequence, sync, sequence_path)
+
+
+@app.put("/api/experiment/config")
+def put_experiment_config(req: ExperimentConfigRequest):
+    if sequence_controller is not None:
+        status = sequence_controller.get_status().get("status")
+        if status in sequence_controller.ACTIVE_STATES | {"awaiting_upload", "running_autonomous"}:
+            raise HTTPException(status_code=409, detail="実験実行中は条件を変更できません")
+
+    sequence_path = _sequence_config_path()
+    sequence = _read_yaml_path(sequence_path)
+    current_sync = _read_yaml_path(SYNC_PARAMS_PATH)
+    sync = _update_prc_mode(current_sync, req.z_mode)
+
+    _write_yaml_atomic(SYNC_PARAMS_PATH, sync)
+    invalidate_sync_params_cache()
+    return {
+        "status": "saved",
+        "message": "PRC を保存しました。ロボットを再起動してパラメータを再取得してください。",
+        **_experiment_config_view(sequence, sync, sequence_path),
+    }
+
+
 @app.get("/api/discover")
 def discover_device(port: str):
     """Listens to the serial port for 3 seconds to extract UID or agent_id."""
@@ -365,9 +588,23 @@ def get_fleet():
         if state and time.time() - state["last_seen"] < 5.0:
             a["volt"] = state["volt"]
             a["status"] = "online"
+            a["kappa"] = state.get("kappa")
+            a["omega"] = state.get("omega")
+            a["params"] = state.get("params")
+            a["src"] = state.get("src")
+            a["zmode"] = state.get("zmode")
+            a["flex_used"] = state.get("flex_used")
+            a["mode"] = state.get("mode")
         else:
             a["volt"] = None
             a["status"] = "offline"
+            a["kappa"] = None
+            a["omega"] = None
+            a["params"] = None
+            a["src"] = None
+            a["zmode"] = None
+            a["flex_used"] = None
+            a["mode"] = None
             
     return data
 
@@ -462,26 +699,132 @@ def change_id(req: ChangeIdRequest):
         
     return {"status": "success"}
 
+def _agents_with_ips(online_only: bool = True) -> list[dict]:
+    if not AGENTS_YAML_PATH.exists():
+        return []
+    try:
+        with open(AGENTS_YAML_PATH, "r") as f:
+            data = yaml.safe_load(f) or {}
+    except Exception as e:
+        print(f"[CMD] Failed to read agents.yaml: {e}")
+        return []
+
+    agents = [a for a in data.get("agents", []) if a.get("ip") and a.get("id") is not None]
+    if not online_only:
+        return agents
+
+    online = []
+    now = time.time()
+    # Keep a longer window: STATUS is suppressed during log upload.
+    for a in agents:
+        aid = int(a["id"])
+        state = agent_live_state.get(aid)
+        if state and now - state["last_seen"] < 60.0:
+            entry = dict(a)
+            if state.get("ip"):
+                entry["ip"] = state["ip"]
+            if state.get("paused") is not None:
+                entry["paused"] = state["paused"]
+            for field in ("params", "src", "zmode", "flex_used", "mode", "kappa", "omega"):
+                if state.get(field) is not None:
+                    entry[field] = state[field]
+            online.append(entry)
+    # Never fall back to all agents.yaml IPs (causes Host-is-down spam).
+    return online
+
+
+def _send_udp(sock: socket.socket, payload: bytes, host: str, port: int) -> bool:
+    try:
+        sock.sendto(payload, (host, port))
+        return True
+    except OSError:
+        # Offline robots are expected; do not spam the console.
+        return False
+
+
 @app.post("/api/fleet/command")
-def send_global_command(req: GlobalCommandRequest):
+async def send_global_command(req: GlobalCommandRequest):
     if req.command not in ["START", "STOP"]:
         raise HTTPException(status_code=400, detail="Invalid command")
-        
+
+    if sequence_controller is not None:
+        seq_status = sequence_controller.get_status().get("status")
+        if seq_status == "awaiting_upload" and req.command == "STOP":
+            return await sequence_controller.trigger_upload()
+        if seq_status in sequence_controller.ACTIVE_STATES:
+            if req.command == "START":
+                raise HTTPException(status_code=409, detail="位相差シーケンス実行中です")
+            if req.command == "STOP":
+                await sequence_controller.stop()
+
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-    
+    agents = _agents_with_ips(online_only=True)
+    sent_unicast = 0
+    target_desc = [
+        f"{int(a['id'])}@{a['ip']}(paused={a.get('paused', '?')})" for a in agents
+    ]
+
     try:
-        # Send command 3 times to ensure delivery over unreliable UDP
-        for attempt in range(3):
+        # Prefer unicast to recently-seen agents only. Always broadcast as well.
+        for attempt in range(2):
+            for agent in agents:
+                ip = str(agent["ip"])
+                aid = int(agent["id"])
+                port = 5000 + aid
+                if _send_udp(sock, req.command.encode("utf-8"), ip, port):
+                    sent_unicast += 1
+                alias = f"{aid}:ON" if req.command == "START" else f"{aid}:OFF"
+                if _send_udp(sock, alias.encode("utf-8"), ip, port):
+                    sent_unicast += 1
             for port in range(5000, 5020):
-                sock.sendto(req.command.encode('utf-8'), ('255.255.255.255', port))
-                time.sleep(0.01)  # 10ms between individual robots
-            time.sleep(0.1)       # 100ms between retries
-        return {"status": "success", "command": req.command}
+                _send_udp(sock, req.command.encode("utf-8"), "255.255.255.255", port)
+            time.sleep(0.05)
+        print(
+            f"[CMD] {req.command} -> online=[{', '.join(target_desc) or 'none'}] "
+            f"unicast_ok={sent_unicast} + broadcast"
+        )
+        return {
+            "status": "success",
+            "command": req.command,
+            "unicast_targets": len(agents),
+            "unicast_packets_ok": sent_unicast,
+        }
     except Exception as e:
+        print(f"[CMD] {req.command} failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         sock.close()
+
+
+@app.get("/api/experiment/sequence")
+def get_experiment_sequence():
+    if sequence_controller is None:
+        return {"status": "unavailable"}
+    return sequence_controller.get_status()
+
+
+@app.post("/api/experiment/sequence/start")
+async def start_experiment_sequence(req: PhaseSequenceStartRequest):
+    if sequence_controller is None:
+        raise HTTPException(status_code=503, detail="実験シーケンス機能は起動完了後に利用できます")
+    try:
+        return await sequence_controller.start(req.agent_ids)
+    except SequenceValidationError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/experiment/sequence/stop")
+async def stop_experiment_sequence():
+    if sequence_controller is None:
+        raise HTTPException(status_code=503, detail="実験シーケンス機能は起動完了後に利用できます")
+    try:
+        return await sequence_controller.stop()
+    except SequenceValidationError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        print(f"[SEQ] stop endpoint error: {exc}", flush=True)
+        raise HTTPException(status_code=500, detail=f"停止処理エラー: {exc}") from exc
 
 @app.post("/api/fleet/test_servo")
 def test_servo(req: TestServoRequest):

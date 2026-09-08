@@ -188,6 +188,43 @@
             </div>
         </div>
 
+        <div class="glass-panel" id="phase-sequence-panel" style="margin-bottom: 2rem; border-left: 4px solid #f59e0b;">
+            <h2 style="display: flex; justify-content: space-between; align-items: center;">
+                <span id="phase-sequence-title">自動実験：大パドル・電流同期</span>
+                <span id="phase-sequence-state" style="font-size: 0.85rem; color: var(--text-muted);">未開始</span>
+            </h2>
+            <div id="phase-sequence-description" style="font-size: 0.9rem; line-height: 1.6; color: var(--text-muted); margin-top: 0.75rem;">
+                シーケンス設定を確認中…
+            </div>
+            <div id="phase-config-editor" style="margin-top: 1rem; padding: 0.85rem; border: 1px solid rgba(255,255,255,0.12); border-radius: 8px; background: rgba(0,0,0,0.16);">
+                <div style="font-size: 0.82rem; color: #cbd5e1; margin-bottom: 0.65rem; font-weight: 600;">PRC 切替（z(ψ) の形）</div>
+                <div style="display: flex; align-items: flex-end; gap: 0.75rem; flex-wrap: wrap;">
+                    <label style="font-size: 0.78rem; color: var(--text-muted); min-width: 10rem;">
+                        PRC
+                        <select id="experiment-z-mode" style="display:block; width:100%; margin-top:0.25rem; background:var(--bg-dark); color:#fff; border:1px solid var(--border-light); border-radius:4px; padding:0.35rem;">
+                            <option value="zsin">z_sin</option>
+                            <option value="zopt">z_opt</option>
+                            <option value="cos">cos</option>
+                        </select>
+                    </label>
+                    <button id="btn-save-experiment-config" class="btn btn-outline" style="padding:0.45rem 0.8rem;">PRC を保存</button>
+                    <span id="experiment-config-status" style="font-size:0.8rem; color:var(--text-muted);">読込中…</span>
+                </div>
+                <div style="font-size:0.78rem; color:#94a3b8; margin-top:0.65rem; line-height:1.5;">
+                    κ=5、ω=3.5π、シーケンス条件は YAML 規定どおり固定。ここでは PRC だけ変更できます。保存後、ロボットを再起動してください。
+                </div>
+            </div>
+            <div style="display: flex; gap: 0.75rem; align-items: center; margin-top: 1rem; flex-wrap: wrap;">
+                <button id="btn-start-phase-sequence" class="btn" style="background: #f59e0b; color: #111827; font-weight: 700; padding: 0.8rem 1.2rem;" onclick="startPhaseSequence()">
+                    ▶ 自動シーケンス開始
+                </button>
+                <button id="btn-stop-phase-sequence" class="btn" style="background: transparent; border: 1px solid #ef4444; color: #ef4444; padding: 0.8rem 1.2rem;" onclick="stopPhaseSequence()" disabled>
+                    ■ 安全停止
+                </button>
+                <span id="phase-sequence-detail" style="font-family: monospace; font-size: 0.82rem; color: var(--text-muted);">設定を確認中…</span>
+            </div>
+        </div>
+
         <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 2rem;">
             <!-- Chart Panel Template -->
             <div class="glass-panel">
@@ -206,7 +243,7 @@
             
             <div class="glass-panel">
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
-                    <h2 style="margin: 0; font-size: 1.1rem;">曲げセンサ (Flex)</h2>
+                    <h2 style="margin: 0; font-size: 1.1rem;">曲げセンサ (Flex・実験では未使用)</h2>
                     <div style="display: flex; gap: 0.25rem;">
                         <input type="number" id="minFlex" value="500" style="width: 50px; background: rgba(0,0,0,0.3); border: 1px solid var(--border-light); color: #fff; border-radius: 4px; padding: 2px 4px; font-size: 0.8rem;" onchange="updateChartScale('Flex')">
                         <span style="color: var(--text-muted);">~</span>
@@ -323,7 +360,7 @@
     </div>
 
     <!-- Scripts -->
-    <script src="/static/app.js?v=20260716b"></script>
+    <script src="/static/app.js?v=20260907a"></script>
     <script>
         function switchTab(tabId) {
             document.getElementById('tab-fleet').style.display = tabId === 'fleet' ? 'grid' : 'none';

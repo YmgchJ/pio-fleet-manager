@@ -3,6 +3,14 @@ document.addEventListener('DOMContentLoaded', () => {
     loadFleet();
     loadPorts();
     loadWifiConfig();
+    loadExperimentConfig();
+    loadPhaseSequenceStatus();
+    setInterval(loadPhaseSequenceStatus, 1000);
+
+    const saveExperimentConfigBtn = document.getElementById('btn-save-experiment-config');
+    if (saveExperimentConfigBtn) {
+        saveExperimentConfigBtn.addEventListener('click', saveExperimentConfig);
+    }
 
     const saveWifiBtn = document.getElementById('btn-save-wifi');
     if (saveWifiBtn) {
@@ -228,6 +236,32 @@ async function loadFleet(silent = false) {
             const card = document.createElement('div');
             card.className = 'device-card';
             card.id = `card-${agent.id}`;
+
+            // Sync gains actually in effect on the robot (flex-sync firmware only).
+            // Underwater runs have no USB serial, so this is the only pre-START check
+            // that the robot picked up the YAML values rather than firmware defaults.
+            let syncParamsHtml = '';
+            if (agent.kappa !== undefined && agent.kappa !== null) {
+                const loaded = agent.params === 1;
+                const col = loaded ? '#10b981' : '#f59e0b';
+                const omegaPi = (agent.omega / Math.PI).toFixed(2);
+                const srcLabel = agent.src === 1 ? '電流' : '曲げ';
+                const srcCol = agent.src === 1 ? '#eb6834' : '#1baf7a';
+                const currentOnlyLabel = agent.mode === 'current_only' && agent.flex_used === 0
+                    ? '<span style="color:#34d399; font-weight:600;">FLEX OFF</span>'
+                    : '<span style="color:#ef4444; font-weight:600;">FLEX CHECK</span>';
+                syncParamsHtml = `
+                    <div style="margin-top: 0.5rem; display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; font-size: 0.8rem; background: rgba(255,255,255,0.03); border: 1px solid ${col}44; border-left: 3px solid ${col}; border-radius: 6px; padding: 0.4rem 0.6rem;">
+                        <span style="color:${col}; font-weight:600;">${loaded ? 'PARAMS OK' : 'DEFAULTS'}</span>
+                        <span style="color:${srcCol}; font-weight:600;">s = ${srcLabel}</span>
+                        ${currentOnlyLabel}
+                        <span style="color:#e5e7eb;">κ = <b>${agent.kappa.toFixed(2)}</b></span>
+                        <span style="color:#e5e7eb;">ω = <b>${agent.omega.toFixed(3)}</b> <span style="color:#8b92a5;">(${omegaPi}π)</span></span>
+                        ${loaded ? '' : '<span style="color:#f59e0b;">YAML未取得 — START前にFleet Manager再起動</span>'}
+                    </div>
+                `;
+            }
+
             let batteryHtml = '';
             if (agent.volt !== undefined && agent.volt !== null) {
                 if (agent.volt < 0) {
@@ -285,6 +319,7 @@ async function loadFleet(silent = false) {
                     </div>
                     ${batteryHtml}
                 </div>
+                ${syncParamsHtml}
                 <div style="width: 100%;">
                     <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: 0.2rem;">
                         
@@ -675,6 +710,16 @@ function startUpload(target, value) {
 }
 
 // --- Global Command ---
+async function readApiError(res) {
+    const text = await res.text();
+    try {
+        const data = JSON.parse(text);
+        return data.detail || text || `HTTP ${res.status}`;
+    } catch (_) {
+        return text || `HTTP ${res.status}`;
+    }
+}
+
 async function sendGlobalCommand(cmd) {
     try {
         const res = await fetch('/api/fleet/command', {
@@ -683,12 +728,259 @@ async function sendGlobalCommand(cmd) {
             body: JSON.stringify({ command: cmd })
         });
         if (!res.ok) {
-            const err = await res.json();
-            throw new Error(err.detail);
+            throw new Error(await readApiError(res));
         }
         console.log(`Global command ${cmd} sent successfully.`);
     } catch (err) {
         alert("コマンド送信に失敗しました: " + err.message);
+    }
+}
+
+function setExperimentConfigStatus(text, kind = 'muted') {
+    const el = document.getElementById('experiment-config-status');
+    if (!el) return;
+    const colors = { ok: '#34d399', warn: '#fbbf24', err: '#f87171', muted: '#94a3b8', busy: '#60a5fa' };
+    el.textContent = text;
+    el.style.color = colors[kind] || colors.muted;
+}
+
+function applyExperimentConfigToForm(data) {
+    const el = document.getElementById('experiment-z-mode');
+    if (el && data.z_mode) el.value = data.z_mode;
+}
+
+async function loadExperimentConfig() {
+    try {
+        const res = await fetch('/api/experiment/config', { cache: 'no-store' });
+        if (!res.ok) throw new Error(await readApiError(res));
+        const data = await res.json();
+        applyExperimentConfigToForm(data);
+        setExperimentConfigStatus(`読込: PRC=${data.z_mode || '—'}`, 'ok');
+    } catch (err) {
+        setExperimentConfigStatus(`設定読込失敗: ${err.message}`, 'err');
+    }
+}
+
+async function saveExperimentConfig() {
+    const button = document.getElementById('btn-save-experiment-config');
+    try {
+        const payload = {
+            z_mode: document.getElementById('experiment-z-mode')?.value || 'zopt',
+        };
+        if (button) {
+            button.disabled = true;
+            button.textContent = '保存中…';
+        }
+        setExperimentConfigStatus('PRC を保存中…', 'busy');
+        const res = await fetch('/api/experiment/config', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        if (!res.ok) throw new Error(await readApiError(res));
+        const data = await res.json();
+        applyExperimentConfigToForm(data);
+        setExperimentConfigStatus('保存しました。ロボットを再起動してください', 'ok');
+        await loadPhaseSequenceStatus();
+    } catch (err) {
+        setExperimentConfigStatus(`保存失敗: ${err.message}`, 'err');
+    } finally {
+        if (button) {
+            button.disabled = false;
+            button.textContent = 'PRC を保存';
+        }
+    }
+}
+
+// --- Automatic experiment sequence ---
+const phaseSequenceActiveStates = new Set([
+    'preparing', 'arming', 'armed', 'running', 'running_autonomous', 'waiting_for_logs', 'stopping', 'error'
+]);
+const phaseSequenceBlockStartStates = new Set([
+    ...phaseSequenceActiveStates,
+    'awaiting_upload',
+]);
+let phaseSequenceAgentIds = [11, 12];
+let phaseSequenceReferenceId = 12;
+let phaseSequencePartnerId = 11;
+let phaseSequenceType = 'phase_sweep';
+let phaseSequenceConfirmHint =
+    '開始予約後20 s以内に水中へ入れ、電池・防水を確認してください。（最初の動作は30 s後、各試行前に10 s停止、全行程約7分20秒）';
+
+function updatePhaseSequencePanelCopy(data) {
+    const titleEl = document.getElementById('phase-sequence-title');
+    const descEl = document.getElementById('phase-sequence-description');
+    if (titleEl && data.ui_title) {
+        titleEl.textContent = data.ui_title;
+    }
+    if (descEl && data.ui_description) {
+        descEl.textContent = data.ui_description;
+    }
+    if (data.ui_confirm_hint) {
+        phaseSequenceConfirmHint = data.ui_confirm_hint;
+    }
+    if (data.sequence_type) {
+        phaseSequenceType = data.sequence_type;
+    }
+}
+
+function formatPhaseSequencePairLabel() {
+    return `ID ${phaseSequenceReferenceId}(偶・基準) / ${phaseSequencePartnerId}(奇)`;
+}
+
+function phaseSequenceStateLabel(status, totalTrials = 6) {
+    const labels = {
+        idle: '未開始',
+        preparing: '準備待機',
+        arming: '両機を準備中',
+        armed: '開始待ち',
+        running: '記録中',
+        running_autonomous: '水中自律実行中',
+        awaiting_upload: 'アップロード待ち',
+        waiting_for_logs: 'ログ一括転送中',
+        stopping: '停止中',
+        stopped: '停止済み',
+        completed: `全${totalTrials}条件完了`,
+        error: 'エラー',
+        unavailable: 'サーバ起動待ち'
+    };
+    return labels[status] || status || '未開始';
+}
+
+function formatSequenceDuration(seconds) {
+    const totalSeconds = Math.max(0, Math.ceil(Number(seconds) || 0));
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const remainingSeconds = totalSeconds % 60;
+    if (hours > 0) {
+        return `${hours}:${String(minutes).padStart(2, '0')}:${String(remainingSeconds).padStart(2, '0')}`;
+    }
+    return `${minutes}:${String(remainingSeconds).padStart(2, '0')}`;
+}
+
+async function loadPhaseSequenceStatus() {
+    const stateEl = document.getElementById('phase-sequence-state');
+    const detailEl = document.getElementById('phase-sequence-detail');
+    const startBtn = document.getElementById('btn-start-phase-sequence');
+    const stopBtn = document.getElementById('btn-stop-phase-sequence');
+    if (!stateEl || !detailEl) return;
+    try {
+        const res = await fetch('/api/experiment/sequence', { cache: 'no-store' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        const status = data.status || 'idle';
+        const totalTrials = Number(data.total_trials || 6);
+        if (Array.isArray(data.default_agent_ids) && data.default_agent_ids.length === 2) {
+            phaseSequenceAgentIds = data.default_agent_ids.map((id) => Number(id));
+        }
+        if (Number.isFinite(Number(data.phase_reference_agent))) {
+            phaseSequenceReferenceId = Number(data.phase_reference_agent);
+        }
+        if (Number.isFinite(Number(data.phase_partner_agent))) {
+            phaseSequencePartnerId = Number(data.phase_partner_agent);
+        }
+        updatePhaseSequencePanelCopy(data);
+        stateEl.textContent = phaseSequenceStateLabel(status, totalTrials);
+        stateEl.style.color = status === 'error' ? '#ef4444' : (phaseSequenceBlockStartStates.has(status) ? '#f59e0b' : '#94a3b8');
+        if (startBtn) startBtn.disabled = phaseSequenceBlockStartStates.has(status);
+        if (stopBtn) stopBtn.disabled = !phaseSequenceActiveStates.has(status);
+
+        if (status === 'error') {
+            const acks = Array.isArray(data.go_ack_agents) ? data.go_ack_agents : [];
+            const ackText = acks.length
+                ? `受信確認済み: ${acks.map((id) => `#${id}✓`).join(' ')}`
+                : '受信確認なし';
+            detailEl.textContent =
+                `開始前エラー（自律実行は未開始）｜${ackText}｜${data.error || data.message || '原因不明'}`;
+        } else if (status === 'awaiting_upload') {
+            detailEl.textContent = `${totalTrials}条件完了。水上で「STOP ALL」を押してログを一括アップロードしてください`;
+        } else if (status === 'running_autonomous') {
+            const endEpoch = Number(data.robot_motion_end_epoch ?? data.expected_end_epoch);
+            if (Number.isFinite(endEpoch)) {
+                const nowEpoch = Date.now() / 1000;
+                const remaining = Math.max(0, endEpoch - nowEpoch);
+                const startEpoch = Number(data.motion_start_epoch ?? data.start_at_epoch);
+                const elapsed = Number.isFinite(startEpoch)
+                    ? Math.max(0, nowEpoch - startEpoch)
+                    : null;
+                if (remaining > 0) {
+                    detailEl.textContent =
+                        `水中自律実行中｜経過 ${elapsed === null ? '—' : formatSequenceDuration(elapsed)}｜残り ${formatSequenceDuration(remaining)}｜${totalTrials}条件完了で中央停止｜PC通信不要`;
+                } else {
+                    detailEl.textContent =
+                        `ロボットは${totalTrials}条件完了で停止済み。浮上後に「STOP ALL」でログをアップロードしてください`;
+                }
+            } else {
+                detailEl.textContent = data.message || '水中自律実行中。PC通信は不要です';
+            }
+        } else if ((status === 'preparing' || status === 'armed') && data.start_at_epoch) {
+            const remaining = Math.max(0, data.start_at_epoch - Date.now() / 1000);
+            const timing = data.timing || {};
+            const firstDelay = Math.max(0, Number(timing.first_start_delay_ms ?? 20000) / 1000);
+            const centeredPause = Math.max(0, Number(timing.inter_trial_pause_ms ?? 10000) / 1000);
+            const stage = remaining > centeredPause
+                ? `入水・姿勢確認｜中央停止まで ${formatSequenceDuration(remaining - centeredPause)}`
+                : `中央停止｜動作開始まで ${formatSequenceDuration(remaining)}`;
+            const acks = Array.isArray(data.go_ack_agents) ? data.go_ack_agents : [];
+            const ackText = acks.length
+                ? `GO確認: ${acks.map((id) => `#${id}✓`).join(' ')}`
+                : 'GO確認待ち…';
+            const totalPreStart = firstDelay + centeredPause;
+            detailEl.textContent =
+                `${stage}｜最初の動作まで ${formatSequenceDuration(remaining)}（全体 ${formatSequenceDuration(totalPreStart)}）｜${ackText}｜両機サーボが一度動けばOK`;
+        } else if (data.current_trial) {
+            const condition = data.condition || '';
+            if (phaseSequenceType === 'delta_omega_sweep') {
+                detailEl.textContent = `trial ${data.current_trial}/${totalTrials}｜${condition}｜Δωスイープ｜${data.message || ''}`;
+            } else {
+                const phase = Number(data.phase_difference_target_rad);
+                const phaseText = Number.isFinite(phase) ? `${phase.toFixed(6)} rad` : '—';
+                detailEl.textContent = `trial ${data.current_trial}/${totalTrials}｜${condition}｜Δφ=${phaseText}｜${data.message || ''}`;
+            }
+        } else {
+            detailEl.textContent = data.message || `設定済み：${formatPhaseSequencePairLabel()}｜${totalTrials}条件`;
+        }
+    } catch (err) {
+        stateEl.textContent = '接続待ち';
+        stateEl.style.color = '#94a3b8';
+        detailEl.textContent = 'シーケンス状態を取得できません';
+        if (startBtn) startBtn.disabled = true;
+        if (stopBtn) stopBtn.disabled = true;
+    }
+}
+
+async function startPhaseSequence() {
+    const pairLabel = formatPhaseSequencePairLabel();
+    if (!confirm(`${pairLabel} を中央姿勢にして開始予約を送信します。${phaseSequenceConfirmHint}`)) {
+        return;
+    }
+    const startBtn = document.getElementById('btn-start-phase-sequence');
+    if (startBtn) startBtn.disabled = true;
+    try {
+        const res = await fetch('/api/experiment/sequence/start', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ agent_ids: phaseSequenceAgentIds })
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+        await loadPhaseSequenceStatus();
+    } catch (err) {
+        alert(`自動シーケンスを開始できません: ${err.message}`);
+        await loadPhaseSequenceStatus();
+    }
+}
+
+async function stopPhaseSequence() {
+    if (!confirm('自動シーケンスを安全停止します。実行中の条件は中断され、次条件へは進みません。')) {
+        return;
+    }
+    try {
+        const res = await fetch('/api/experiment/sequence/stop', { method: 'POST' });
+        if (!res.ok) throw new Error(await readApiError(res));
+        await loadPhaseSequenceStatus();
+    } catch (err) {
+        alert(`自動シーケンスを停止できません: ${err.message}`);
     }
 }
 

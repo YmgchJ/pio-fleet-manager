@@ -9,16 +9,21 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Callable, Optional
 
 from chunk_processor import build_dataframe_for_chunk, merge_and_save_chunks
+from session_metadata import SessionMetadataRecorder
 
 RECORD_STRUCT_V7 = struct.Struct("<7B")  # micros24 (3B) + a0 + a1 + a2 + a3
 RECORD_STRUCT_V6 = struct.Struct("<6B")  # legacy Volcovine (no bus voltage)
 RECORD_SIZE_V7 = RECORD_STRUCT_V7.size
 RECORD_SIZE_V6 = RECORD_STRUCT_V6.size
-CHUNK_TIMEOUT_SEC = 5.0
-SESSION_MERGE_FALLBACK_SEC = 8.0
+# Only flush/merge on LOG_END, or after a long silence (full upload in progress).
+CHUNK_TIMEOUT_SEC = 30.0
+SESSION_MERGE_FALLBACK_SEC = 30.0
+# Ignore orphan retransmit packets after a merge (robots stuck retrying ACK).
+ORPHAN_RETRANSMIT_IGNORE_SEC = 20.0
+MIN_RECORDS_TO_KEEP_SESSION = 200
 
 DATA_ROOT = Path(__file__).resolve().parent / "data"
 SAVED_CHUNKS_DIR = DATA_ROOT / "saved_chunks"
@@ -40,6 +45,10 @@ class LogReceiver:
         self._session_id: str | None = None
         self._session_dir: Path | None = None
         self._log_end: dict[int, tuple[int, bool, float]] = {}
+        self._last_raw_packet: dict[int, bytes] = {}
+        self._metadata = SessionMetadataRecorder()
+        self._sequence_context: dict[str, Any] | None = None
+        self._on_session_merged: Callable[[str | None, str, dict[str, Any] | None], None] | None = None
         SAVED_CHUNKS_DIR.mkdir(parents=True, exist_ok=True)
         MERGED_CHUNKS_DIR.mkdir(parents=True, exist_ok=True)
         EXPERIMENTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -52,16 +61,49 @@ class LogReceiver:
     def _ensure_session(self) -> None:
         if self._session_id is not None:
             return
-        self._session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        base_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self._session_id = base_id
+        suffix = 1
+        while (EXPERIMENTS_DIR / self._session_id).exists():
+            self._session_id = f"{base_id}_{suffix:02d}"
+            suffix += 1
         self._session_dir = EXPERIMENTS_DIR / self._session_id
         (self._session_dir / "chunks").mkdir(parents=True, exist_ok=True)
         (self._session_dir / "archive").mkdir(parents=True, exist_ok=True)
+        self._metadata.on_session_start(self._session_id, self._session_dir, self._sequence_context)
         print(f"[Session] Started experiment session {self._session_id}")
 
     def _reset_session(self) -> None:
         self._session_id = None
         self._session_dir = None
         self._log_end.clear()
+        self._last_log_packet = None
+        self._sequence_context = None
+        self._metadata.reset()
+
+    def record_params_served(self, agent_id: int, payload: str, parsed: dict) -> None:
+        self._metadata.record_params_served(agent_id, payload, parsed)
+
+    def record_status(self, agent_id: int, telemetry: dict) -> None:
+        self._metadata.record_status(agent_id, telemetry)
+
+    def record_experiment_event(self, agent_id: int, event: dict[str, Any]) -> None:
+        self._metadata.record_experiment_event(agent_id, event)
+
+    def set_sequence_context(self, context: dict[str, Any] | None) -> None:
+        with self._lock:
+            if self._session_id is not None:
+                # A new context is only valid after the previous session has been
+                # merged. Refuse to relabel an active CSV silently.
+                print("[Session] WARN: ignored sequence context while a session is active")
+                return
+            self._sequence_context = dict(context) if context else None
+
+    def set_session_merged_callback(
+        self,
+        callback: Callable[[str | None, str, dict[str, Any] | None], None] | None,
+    ) -> None:
+        self._on_session_merged = callback
 
     @staticmethod
     def _agents_from_chunk_paths(paths: list[str]) -> set[int]:
@@ -111,12 +153,20 @@ class LogReceiver:
         with self._lock:
             self._ensure_session()
             chunk_data, send_list, recv_list = self._buffers.get(agent_id, ([], [], []))
-            chunk_data.extend(records)
-            send_list.append(send_micros)
-            recv_list.append(recv_time)
-            self._buffers[agent_id] = (chunk_data, send_list, recv_list)
-            self._last_recv[agent_id] = recv_time
-            self._last_log_packet = recv_time
+            if self._last_raw_packet.get(agent_id) == raw:
+                total = len(chunk_data)
+            else:
+                chunk_data.extend(records)
+                send_list.append(send_micros)
+                recv_list.append(recv_time)
+                self._buffers[agent_id] = (chunk_data, send_list, recv_list)
+                self._last_recv[agent_id] = recv_time
+                self._last_log_packet = recv_time
+                self._last_raw_packet[agent_id] = raw
+                total = len(chunk_data)
+
+        if total <= 72 or total % 360 == 0:
+            print(f"[LOG] agent={agent_id} +{len(records)} records from {addr[0]} (buf={total})")
 
         last = raw[-record_size:]
         if record_size == RECORD_SIZE_V7:
@@ -127,7 +177,14 @@ class LogReceiver:
         ack = bytes([agent_id]) + last_micros24.to_bytes(3, "little")
         return ack
 
-    def handle_log_end(self, agent_id: int, records: int, ok: bool) -> None:
+    def handle_log_end(
+        self,
+        agent_id: int,
+        records: int,
+        ok: bool,
+        sequence_id: str | None = None,
+        trial: int | None = None,
+    ) -> None:
         with self._lock:
             # Firmware retries LOG_END up to 5×; after merge we reset the session.
             # Ignore late duplicates that would spawn an empty experiments/ folder.
@@ -136,6 +193,7 @@ class LogReceiver:
                 return
             self._ensure_session()
             self._log_end[agent_id] = (records, ok, time.time())
+            self._metadata.record_log_end(agent_id, records, ok, sequence_id, trial)
         status = "OK" if ok else "FAILED"
         print(f"[LOG_END] agent={agent_id} records={records} {status}")
         self.flush_agent(agent_id)
@@ -145,6 +203,7 @@ class LogReceiver:
         with self._lock:
             buf = self._buffers.pop(agent_id, None)
             self._last_recv.pop(agent_id, None)
+            self._last_raw_packet.pop(agent_id, None)
         if not buf:
             return None
         chunk_data, send_list, recv_list = buf
@@ -176,6 +235,7 @@ class LogReceiver:
             self._pending_files.clear()
             session_dir = self._session_dir
             session_id = self._session_id
+            sequence_context = self._sequence_context
 
         if output_dir is None:
             if session_dir is not None:
@@ -202,9 +262,23 @@ class LogReceiver:
                 shutil.copy2(merged, legacy)
             except OSError as e:
                 print(f"[WARN] Could not copy merged CSV to legacy dir: {e}")
+            try:
+                self._metadata.finalize(
+                    session_dir=session_dir,
+                    session_id=session_id or Path(merged).stem.replace("merged_", ""),
+                    merged_csv=Path(merged),
+                    chunk_files=files,
+                )
+            except OSError as e:
+                print(f"[WARN] Could not write session metadata: {e}")
 
         with self._lock:
             self._reset_session()
+        if merged and self._on_session_merged:
+            try:
+                self._on_session_merged(session_id, str(merged), sequence_context)
+            except Exception as exc:
+                print(f"[Session] merge callback error: {exc}")
         return merged
 
     def _maybe_finalize_session(self) -> None:
@@ -248,4 +322,5 @@ class LogReceiver:
                 "pending_chunks": len(self._pending_files),
                 "log_end_agents": list(self._log_end.keys()),
                 "active_buffers": list(self._buffers.keys()),
+                "sequence": self._sequence_context,
             }
