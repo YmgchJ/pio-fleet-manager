@@ -29,6 +29,7 @@ from sync_params import (
     build_param_payload,
     effective_prc_params,
     invalidate_sync_params_cache,
+    load_sync_params,
     parse_param_payload,
 )
 from experiment_sequence import ExperimentSequenceController, SequenceValidationError
@@ -127,15 +128,17 @@ def parse_sequence_event(msg: str, ip_address: str) -> dict:
         if not key:
             continue
         if key in {"trial", "agent", "elapsed_ms", "feedback_start_ms", "duration_ms", "start_delay_ms",
-                   "zmode", "flex_used", "current_window", "sample_period_us", "ina_ready", "ina_ok",
-                   "ina_fail", "records", "upload_ok"}:
+                   "zmode", "flex_used", "current_window", "normalization_window",
+                   "sample_period_us", "ina_ready", "ina_ok",
+                   "ina_fail", "records", "upload_ok", "trial_start_micros24",
+                   "trial_feedback_micros24", "max_start_late_ms"}:
             try:
                 event[key] = int(float(value))
                 continue
             except ValueError:
                 pass
         if key in {"phase_offset", "phase_diff_target", "kappa", "kappa_now", "omega",
-                   "feedback_tau", "servo_center", "servo_amplitude"}:
+                   "feedback_tau", "servo_center", "servo_amplitude", "phase_correction"}:
             try:
                 event[key] = float(value)
                 continue
@@ -368,14 +371,19 @@ def _write_yaml_atomic(path: Path, data: dict) -> None:
 def _experiment_config_view(sequence: dict, sync: dict, sequence_path: Path) -> dict:
     sequence_type = str(sequence.get("sequence_type", "phase_sweep")).lower()
     trial_count = len(sequence.get("delta_omega_rad", []) or sequence.get("phase_differences_rad", []))
+    seq_kappa = float(sequence.get("kappa", sync.get("kappa", 5.0)))
+    sync_kappa = float(sync.get("kappa", seq_kappa))
     return {
         "sequence_config_path": str(sequence_path),
         "sync_params_path": str(SYNC_PARAMS_PATH),
         "z_mode": str(sync.get("z_mode", "cos")).lower(),
         "sequence_type": sequence_type,
+        "experiment_mode": str(sequence.get("experiment_mode", "synchronization")).lower(),
         "trial_count": trial_count,
         "trial_duration_s": float(sequence.get("trial_duration_ms", 60000)) / 1000.0,
-        "kappa": float(sequence.get("kappa", sync.get("kappa", 5.0))),
+        "kappa": seq_kappa,
+        "sync_yaml_kappa": sync_kappa,
+        "kappa_yaml_aligned": abs(seq_kappa - sync_kappa) < 1e-6,
     }
 
 
@@ -506,6 +514,42 @@ def get_experiment_config():
     sequence = _read_yaml_path(sequence_path)
     sync = _read_yaml_path(SYNC_PARAMS_PATH)
     return _experiment_config_view(sequence, sync, sequence_path)
+
+
+@app.post("/api/experiment/reload")
+def reload_experiment_config():
+    """Re-read fleet YAML from disk (no FM process restart). Robots still need reboot to latch new PRC."""
+    if sequence_controller is not None:
+        status = sequence_controller.get_status().get("status")
+        if status in sequence_controller.ACTIVE_STATES | {"awaiting_upload", "running_autonomous"}:
+            raise HTTPException(status_code=409, detail="実験実行中は設定を再読込できません")
+
+    invalidate_sync_params_cache()
+    sequence_path = _sequence_config_path()
+    sequence = _read_yaml_path(sequence_path)
+    sync = load_sync_params()
+    preview: dict = {}
+    if sequence_controller is not None:
+        st = sequence_controller.get_status()
+        for key in (
+            "message",
+            "total_trials",
+            "z_mode",
+            "expected_kappa",
+            "kappa_yaml_aligned",
+            "sequence_type",
+        ):
+            if key in st:
+                preview[key] = st[key]
+    return {
+        "status": "reloaded",
+        "message": (
+            "シーケンス YAML と sync_experiment_params.yaml を再読み込みしました。"
+            "実機の zmode/κ/ω は停止状態でリブート（または OTA 再起動）後に反映されます。"
+        ),
+        "sequence_preview": preview,
+        **_experiment_config_view(sequence, sync, sequence_path),
+    }
 
 
 @app.put("/api/experiment/config")

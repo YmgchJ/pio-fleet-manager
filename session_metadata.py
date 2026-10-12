@@ -73,8 +73,9 @@ def _build_experiment_conditions(
         },
         "omega_rad_s_by_agent": omega_by_agent,
         "log": {
-            "sample_rate_hz": 50,
-            "note": "Sequence mode uses saveInterval=10 at 500 Hz control",
+            "sample_rate_hz": float(ctx.get("sequence_log_hz", 50)),
+            "save_interval": int(ctx.get("save_interval", 10)),
+            "note": "Sequence mode: 500 Hz control, log decimation via save_interval",
             "columns": {
                 "a0": "phase psi mod 2pi (0..255 -> 0..2pi rad)",
                 "a1": "INA226 shunt current [mA], signed byte 128=0, +/-1000 mA",

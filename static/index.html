@@ -208,10 +208,11 @@
                         </select>
                     </label>
                     <button id="btn-save-experiment-config" class="btn btn-outline" style="padding:0.45rem 0.8rem;">PRC を保存</button>
+                    <button type="button" id="btn-reload-experiment-config" class="btn btn-outline" style="padding:0.45rem 0.8rem;">設定を再読込</button>
                     <span id="experiment-config-status" style="font-size:0.8rem; color:var(--text-muted);">読込中…</span>
                 </div>
                 <div style="font-size:0.78rem; color:#94a3b8; margin-top:0.65rem; line-height:1.5;">
-                    κ=5、ω=3.5π、シーケンス条件は YAML 規定どおり固定。ここでは PRC だけ変更できます。保存後、ロボットを再起動してください。
+                    <code>activate_*.sh</code> で YAML を差し替えたあとは<strong>「設定を再読込」</strong>でシーケンス表示を更新できます（FM プロセスの再起動は不要）。Monitor の zmode/κ/ω は<strong>実機が一度読み込んだ値</strong>のため、PRC 変更後は<strong>各機リブート</strong>（または OTA 再起動）が必要です。
                 </div>
             </div>
             <div style="display: flex; gap: 0.75rem; align-items: center; margin-top: 1rem; flex-wrap: wrap;">
@@ -360,7 +361,7 @@
     </div>
 
     <!-- Scripts -->
-    <script src="/static/app.js?v=20260907a"></script>
+    <script src="/static/app.js?v=20261001b"></script>
     <script>
         function switchTab(tabId) {
             document.getElementById('tab-fleet').style.display = tabId === 'fleet' ? 'grid' : 'none';

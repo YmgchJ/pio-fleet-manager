@@ -26,10 +26,27 @@ import yaml
 
 from sync_params import Z_MODES, effective_prc_params, load_sync_params
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
 AUTONOMOUS_MARGIN_S = 30.0
-MAX_SEQUENCE_TRIALS = 7
-SEQUENCE_LOG_HZ = 50.0
+MAX_SEQUENCE_TRIALS = 13
+SEQUENCE_LOG_HZ_DEFAULT = 50.0
+SEQUENCE_CONTROL_LOOP_HZ = 500.0
+ALLOWED_SEQUENCE_LOG_HZ = (50.0, 25.0)
 LOG_BUFFER_RECORD_CAPACITY = 21000
+
+
+def _sequence_log_hz_and_save_interval(config: dict[str, Any]) -> tuple[float, int]:
+    log_hz = float(config.get("sequence_log_hz", SEQUENCE_LOG_HZ_DEFAULT))
+    if log_hz not in ALLOWED_SEQUENCE_LOG_HZ:
+        allowed = ", ".join(str(int(h)) for h in ALLOWED_SEQUENCE_LOG_HZ)
+        raise SequenceValidationError(
+            f"sequence_log_hz must be one of {{{allowed}}} (got {log_hz})"
+        )
+    save_interval = int(SEQUENCE_CONTROL_LOOP_HZ / log_hz)
+    if abs(SEQUENCE_CONTROL_LOOP_HZ / save_interval - log_hz) > 1e-6:
+        raise SequenceValidationError(f"sequence_log_hz {log_hz} is not an integer decimation of 500 Hz")
+    return log_hz, save_interval
 
 
 class SequenceValidationError(ValueError):
@@ -74,6 +91,14 @@ def _phase_difference_definition(reference_agent: int, partner_agent: int) -> st
     return f"phase_agent_{reference_agent}_minus_phase_agent_{partner_agent}"
 
 
+def _sequence_parameter_path(config: dict[str, Any]) -> Path:
+    rel = str(config.get("parameter_file", "fleet/sync_experiment_params.yaml"))
+    path = Path(rel)
+    if not path.is_absolute():
+        path = REPO_ROOT / rel
+    return path
+
+
 def _sequence_ui_copy(
     config: dict[str, Any],
     sequence_type: str,
@@ -81,7 +106,7 @@ def _sequence_ui_copy(
     partner_agent: int,
 ) -> dict[str, str]:
     """Human-readable dashboard copy derived from the active sequence YAML."""
-    sync_params = load_sync_params()
+    sync_params = load_sync_params(_sequence_parameter_path(config))
     z_mode = str(sync_params.get("z_mode", "cos")).lower()
     z_label = {
         "zopt": "z_opt（逆設計）",
@@ -96,35 +121,58 @@ def _sequence_ui_copy(
     feedback_start_s = float(config.get("feedback_start_ms", 10000)) / 1000.0
     pause_s = float(config.get("inter_trial_pause_ms", 10000)) / 1000.0
     first_delay_s = float(config.get("first_start_delay_ms", 20000)) / 1000.0
+    kappa = float(config.get("kappa", 5.0))
+    open_loop = str(config.get("experiment_mode", "")).lower() == "open_loop_identification"
     autonomous_s = first_delay_s + total_trials * (pause_s + duration_s)
     pair_text = (
         f"偶数ID {reference_agent}（基準・ω 固定）と奇数ID {partner_agent}（パートナー・ω 変更）のペア。"
     )
-    timing_text = (
-        f"開始予約後{first_delay_s:.0f} sは水中投入・姿勢確認、その後{pause_s:.0f} sは中央停止、"
-        f"各条件は{duration_s:.0f} s（0–{feedback_start_s:.0f} s: κ=0、"
-        f"{feedback_start_s:.0f}–{duration_s:.0f} s: 電流フィードバック κ=5）。"
-        f"最初の動作までは{first_delay_s + pause_s:.0f} s、全{total_trials}条件は約{_format_duration_jp(autonomous_s)}です。"
-    )
+    if open_loop:
+        timing_text = (
+            f"開始予約後{first_delay_s:.0f} sは水中投入・姿勢確認、その後{pause_s:.0f} sは中央停止、"
+            f"記録は{duration_s:.0f} s（全区間κ=0の開ループ）。"
+            f"最初の動作までは{first_delay_s + pause_s:.0f} s、"
+            f"全体は約{_format_duration_jp(autonomous_s)}です。"
+        )
+    else:
+        timing_text = (
+            f"開始予約後{first_delay_s:.0f} sは水中投入・姿勢確認、その後{pause_s:.0f} sは中央停止、"
+            f"各条件は{duration_s:.0f} s（0–{feedback_start_s:.0f} s: κ=0、"
+            f"{feedback_start_s:.0f}–{duration_s:.0f} s: 電流フィードバック κ={kappa:g}）。"
+            f"最初の動作までは{first_delay_s + pause_s:.0f} s、全{total_trials}条件は約{_format_duration_jp(autonomous_s)}です。"
+        )
     common_tail = (
         "曲げセンサは使用せず、current-only ファームウェアであることを開始前に検査します。"
         f" Z(ψ)={z_label}（fleet/sync_experiment_params.yaml）。"
     )
     if sequence_type == "delta_omega_sweep":
         omega_base = float(config.get("omega_base_rad_s", 3.5 * math.pi))
+        omega_pi = omega_base / math.pi
         labels = [str(v) for v in config.get("delta_omega_labels", [])]
         condition_text = ", ".join(labels) if labels else "Δω = 0 … 0.25π"
         analysis_window = (
-            "解析窓は各試行の最終60 s（Eq.36 用）。"
+            "同定解析は開始・終了端を除く10–130 sを使用。"
+            if open_loop
+            else "解析窓は各試行の最終60 s（Eq.36 用）。"
             if duration_s >= 120.0
             else "解析窓は各試行 10–50 s（定常区間）。"
         )
+        paddle = str(config.get("paddle", "big")).lower()
+        paddle_label = {
+            "standard": "標準パドル",
+            "mid": "中間パドル",
+            "big": "大パドル",
+        }.get(paddle, paddle)
         return {
-            "ui_title": f"自動実験：大パドル・電流同期・Δω両側スイープ{total_trials}条件",
+            "ui_title": (
+                f"自動実験：{paddle_label}・電流S関数同定・開ループ"
+                if open_loop
+                else f"自動実験：{paddle_label}・電流同期・Δω両側スイープ{total_trials}条件"
+            ),
             "ui_description": (
                 f"{pair_text} {timing_text}"
                 f"条件は partner の自然角速度を段階変更（{condition_text}）。"
-                f"基準 ω≈{omega_base:.3f} rad/s（3.5π）。{analysis_window}"
+                f"基準 ω≈{omega_base:.3f} rad/s（{omega_pi:.2f}π）。{analysis_window}"
                 f" {common_tail}"
             ),
             "ui_confirm_hint": f"開始予約後{first_delay_s:.0f} s以内に水中へ入れ、電池・防水を確認してください。",
@@ -175,6 +223,8 @@ class ExperimentSequenceController:
         self._merged_event: asyncio.Event | None = None
         self._armed_agents: set[int] = set()
         self._go_ack_agents: set[int] = set()
+        self._go_scheduled_events: dict[int, dict[str, Any]] = {}
+        self._phase_corrected_agents: set[int] = set()
         self._started_agents: set[int] = set()
         self._trial_stopped_agents: set[int] = set()
         self._trial_log_end: dict[int, dict[str, Any]] = {}
@@ -251,10 +301,14 @@ class ExperimentSequenceController:
                 f"{condition_count}条件"
             )
         ui = _sequence_ui_copy(config, sequence_type, reference_agent, partner_agent)
+        sync_preview = load_sync_params(_sequence_parameter_path(config))
+        expected_kappa = float(config.get("kappa", 5.0))
+        sync_yaml_kappa = float(sync_preview.get("kappa", expected_kappa))
         return {
             "default_agent_ids": default_agents,
             "pairing_rule": pairing_rule,
             "sequence_type": sequence_type,
+            "experiment_mode": str(config.get("experiment_mode", "synchronization")).lower(),
             "total_trials": condition_count,
             "phase_reference_agent": reference_agent,
             "phase_partner_agent": partner_agent,
@@ -262,7 +316,10 @@ class ExperimentSequenceController:
                 reference_agent, partner_agent
             ),
             "message": message,
-            "z_mode": str(load_sync_params().get("z_mode", "cos")).lower(),
+            "expected_kappa": expected_kappa,
+            "sync_yaml_kappa": sync_yaml_kappa,
+            "kappa_yaml_aligned": abs(expected_kappa - sync_yaml_kappa) < 1e-6,
+            "z_mode": str(sync_preview.get("z_mode", "cos")).lower(),
             **ui,
         }
 
@@ -311,9 +368,17 @@ class ExperimentSequenceController:
         else:
             raise SequenceValidationError(f"unknown pairing_rule: {pairing_rule}")
 
+        experiment_mode = str(config.get("experiment_mode", "synchronization")).lower()
+        if experiment_mode not in ("synchronization", "open_loop_identification"):
+            raise SequenceValidationError(f"unknown experiment_mode: {experiment_mode}")
+        open_loop = experiment_mode == "open_loop_identification"
         sequence_type = str(config.get("sequence_type", "phase_sweep")).lower()
         if sequence_type not in ("phase_sweep", "delta_omega_sweep"):
             raise SequenceValidationError(f"unknown sequence_type: {sequence_type}")
+        if open_loop and sequence_type != "delta_omega_sweep":
+            raise SequenceValidationError(
+                "open_loop_identification requires a delta_omega_sweep sequence"
+            )
 
         omega_base_rad_s: float | None = None
         partner_omegas_rad: list[float] | None = None
@@ -352,11 +417,19 @@ class ExperimentSequenceController:
         upload_strategy = str(config.get("upload_strategy", "batch_on_stop")).lower()
         if duration_ms <= 0 or duration_ms > 3600000:
             raise SequenceValidationError("trial_duration_ms is outside the safe range")
-        expected_records = math.ceil(len(phases) * duration_ms / 1000.0 * SEQUENCE_LOG_HZ)
+        sequence_log_hz, save_interval = _sequence_log_hz_and_save_interval(config)
+        expected_records = math.ceil(len(phases) * duration_ms / 1000.0 * sequence_log_hz)
         if expected_records > LOG_BUFFER_RECORD_CAPACITY:
             raise SequenceValidationError(
                 f"sequence would need about {expected_records} log records; "
-                f"split it into runs of at most {LOG_BUFFER_RECORD_CAPACITY} records"
+                f"lower sequence_log_hz (e.g. 25), shorten trials, or split runs "
+                f"(capacity {LOG_BUFFER_RECORD_CAPACITY})"
+            )
+        analysis_end_s = float(config.get("analysis_window_end_s", 50.0))
+        trial_end_s = duration_ms / 1000.0
+        if analysis_end_s > trial_end_s:
+            raise SequenceValidationError(
+                f"analysis_window_end_s={analysis_end_s} exceeds trial duration {trial_end_s}s"
             )
         if feedback_start_ms < 0 or feedback_start_ms >= duration_ms:
             raise SequenceValidationError("feedback_start_ms must be before trial end")
@@ -364,12 +437,17 @@ class ExperimentSequenceController:
             raise SequenceValidationError("first_start_delay_ms is outside the safe range")
         if inter_trial_pause_ms < 0 or inter_trial_pause_ms > 3600000:
             raise SequenceValidationError("inter_trial_pause_ms is outside the safe range")
-        if not math.isfinite(kappa) or abs(kappa - 5.0) > 1e-6:
-            raise SequenceValidationError("この実験の κ は 5.0 に固定してください")
+        expected_kappa = 0.0 if open_loop else 5.0
+        if not math.isfinite(kappa) or abs(kappa - expected_kappa) > 1e-6:
+            raise SequenceValidationError(
+                f"{experiment_mode} の κ は {expected_kappa:.1f} に固定してください"
+            )
         if upload_strategy != "batch_on_stop":
             raise SequenceValidationError("upload_strategy は batch_on_stop のみ対応しています")
 
-        sync_params = copy.deepcopy(effective_prc_params(load_sync_params()))
+        sync_params = copy.deepcopy(
+            effective_prc_params(load_sync_params(_sequence_parameter_path(config)))
+        )
         sync_source = str(sync_params.get("feedback_source", "")).lower()
         if not bool(config.get("current_only", False)):
             raise SequenceValidationError("sequence config must set current_only: true")
@@ -411,6 +489,7 @@ class ExperimentSequenceController:
 
         plan: dict[str, Any] = {
             "name": str(config.get("name", "current_phase_sequence")),
+            "experiment_mode": experiment_mode,
             "sequence_type": sequence_type,
             "agent_ids": agent_ids,
             "paddle": str(config.get("paddle", "big")),
@@ -432,6 +511,9 @@ class ExperimentSequenceController:
             "phase_labels": labels,
             "parameter_file": str(config.get("parameter_file", "fleet/sync_experiment_params.yaml")),
             "sync_params_snapshot": sync_params,
+            "sequence_log_hz": sequence_log_hz,
+            "save_interval": save_interval,
+            "analysis_window_end_s": analysis_end_s,
         }
         if partner_omegas_rad is not None:
             plan["partner_omegas_rad"] = partner_omegas_rad
@@ -454,6 +536,7 @@ class ExperimentSequenceController:
             validation_plan["sync_params_snapshot"].get("z_mode", "cos")
         ).lower()
         expected_z_mode_code = Z_MODES.get(expected_z_mode)
+        expected_kappa = float(validation_plan["kappa"])
         targets: list[dict[str, Any]] = []
         problems: list[str] = []
         if expected_z_mode_code is None:
@@ -486,8 +569,11 @@ class ExperimentSequenceController:
                 problems.append(f"ID {agent_id}: κ を確認できません")
             else:
                 try:
-                    if abs(float(item["kappa"]) - 5.0) > 1e-3:
-                        problems.append(f"ID {agent_id}: κ={item['kappa']}（5.0ではありません）")
+                    if abs(float(item["kappa"]) - expected_kappa) > 1e-3:
+                        problems.append(
+                            f"ID {agent_id}: κ={item['kappa']}"
+                            f"（{expected_kappa:.1f}ではありません）"
+                        )
                 except (TypeError, ValueError):
                     problems.append(f"ID {agent_id}: κ の値が不正です")
             expected_omega = omega_by_agent.get(agent_id, omega_by_agent.get(str(agent_id)))
@@ -498,10 +584,24 @@ class ExperimentSequenceController:
                 problems.append(f"ID {agent_id}: 実機の ω を確認できません")
             else:
                 try:
-                    if abs(float(observed_omega) - float(expected_omega)) > 1e-3:
+                    allowed_omegas = [float(expected_omega)]
+                    if (
+                        agent_id == int(validation_plan["phase_partner_agent"])
+                        and validation_plan.get("partner_omegas_rad")
+                    ):
+                        allowed_omegas.extend(
+                            float(value)
+                            for value in validation_plan["partner_omegas_rad"]
+                        )
+                    if all(
+                        abs(float(observed_omega) - allowed) > 1e-3
+                        for allowed in allowed_omegas
+                    ):
                         problems.append(
                             f"ID {agent_id}: ω={float(observed_omega):.6f} "
-                            f"（設定値 {float(expected_omega):.6f} と不一致）"
+                            f"（許容設定値 "
+                            f"{', '.join(f'{value:.6f}' for value in allowed_omegas)}"
+                            f" と不一致）"
                         )
                 except (TypeError, ValueError):
                     problems.append(f"ID {agent_id}: ω の値が不正です")
@@ -515,6 +615,7 @@ class ExperimentSequenceController:
         assert self._plan is not None
         context: dict[str, Any] = {
             "name": self._plan["name"],
+            "experiment_mode": self._plan.get("experiment_mode", "synchronization"),
             "sequence_id": sequence_id,
             "sequence_type": self._plan.get("sequence_type", "phase_sweep"),
             "upload_strategy": self._plan["upload_strategy"],
@@ -544,6 +645,10 @@ class ExperimentSequenceController:
             context["partner_omegas_rad"] = list(self._plan["partner_omegas_rad"])
         if "omega_base_rad_s" in self._plan:
             context["omega_base_rad_s"] = float(self._plan["omega_base_rad_s"])
+        context["sequence_log_hz"] = float(self._plan.get("sequence_log_hz", SEQUENCE_LOG_HZ_DEFAULT))
+        context["save_interval"] = int(self._plan.get("save_interval", 10))
+        if "analysis_window_end_s" in self._plan:
+            context["analysis_window_end_s"] = float(self._plan["analysis_window_end_s"])
         return context
 
     async def start(self, requested_agent_ids: list[int] | None = None) -> dict[str, Any]:
@@ -694,6 +799,8 @@ class ExperimentSequenceController:
 
         self._armed_agents.clear()
         self._go_ack_agents.clear()
+        self._go_scheduled_events.clear()
+        self._phase_corrected_agents.clear()
         self._started_agents.clear()
         self._trial_start_events.clear()
         self._trial_start_skew_ms = None
@@ -759,12 +866,89 @@ class ExperimentSequenceController:
                 ),
             )
             return False
+
+        schedule_deadline = time.time() + 2.0
+        while (
+            time.time() < schedule_deadline
+            and set(self._go_scheduled_events) < expected_go
+        ):
+            await asyncio.sleep(0.02)
+        missing_schedule = sorted(expected_go - set(self._go_scheduled_events))
+        if missing_schedule:
+            self._send_to_targets("SEQ_ABORT")
+            self._send_stop_burst()
+            self._set_status(
+                "error",
+                error=f"開始時刻確認なし: agents {missing_schedule}",
+                message="初期位相補正に必要な開始時刻を確認できないため中止しました",
+            )
+            return False
+
+        reference_agent = int(self._plan["phase_reference_agent"])
+        partner_agent = int(self._plan["phase_partner_agent"])
+        ref_event = self._go_scheduled_events[reference_agent]
+        partner_event = self._go_scheduled_events[partner_agent]
+        initial_start_skew_s = (
+            float(partner_event["received_timestamp"])
+            - float(ref_event["received_timestamp"])
+        )
+        if abs(initial_start_skew_s) > 0.1:
+            self._send_to_targets("SEQ_ABORT")
+            self._send_stop_burst()
+            self._set_status(
+                "error",
+                initial_start_skew_ms=initial_start_skew_s * 1000.0,
+                message="開始時刻差が100 msを超えたため、安全に初期位相を補正できず中止しました",
+            )
+            return False
+
+        partner_omegas = self._plan.get("partner_omegas_rad")
+        if partner_omegas:
+            partner_omega = float(partner_omegas[0])
+        else:
+            omega_by_agent = self._plan["sync_params_snapshot"]["omega_by_agent"]
+            partner_omega = float(
+                omega_by_agent.get(
+                    partner_agent,
+                    omega_by_agent.get(str(partner_agent)),
+                )
+            )
+        phase_correction_rad = partner_omega * initial_start_skew_s
+        correction_command = (
+            f"SEQ_PHASE_CORRECTION,seq:{sequence_id},"
+            f"correction:{phase_correction_rad:.9f}"
+        )
+        partner_target = next(
+            target
+            for target in self._targets
+            if int(target["id"]) == partner_agent
+        )
+        for _ in range(4):
+            self._send_one(partner_target, correction_command)
+            await asyncio.sleep(0.1)
+            if partner_agent in self._phase_corrected_agents:
+                break
+        if partner_agent not in self._phase_corrected_agents:
+            self._send_to_targets("SEQ_ABORT")
+            self._send_stop_burst()
+            self._set_status(
+                "error",
+                message="パートナー機が初期位相補正を確認しなかったため中止しました",
+            )
+            return False
+
         ack_message = "両機GO確認済（サーボが一度ピコっと動きました）"
-        merged_message = f"{start_message} · {ack_message}"
+        correction_message = (
+            f"開始差 {initial_start_skew_s * 1000.0:+.1f} msを"
+            f"位相 {phase_correction_rad:+.3f} radで補正済"
+        )
+        merged_message = f"{start_message} · {ack_message} · {correction_message}"
         self._set_status(
             "armed",
             start_at_epoch=start_at_epoch,
             go_ack_agents=sorted(self._go_ack_agents),
+            initial_start_skew_ms=initial_start_skew_s * 1000.0,
+            phase_correction_rad=phase_correction_rad,
             message=merged_message,
         )
         return True
@@ -815,6 +999,7 @@ class ExperimentSequenceController:
                 f"inter_trial_pause_ms:{self._plan['inter_trial_pause_ms']},"
                 f"kappa:{self._plan['kappa']:.6f},"
                 f"total_trials:{total_trials},"
+                f"save_interval:{int(self._plan.get('save_interval', 10))},"
                 "src:current,mode:current_only"
             )
             partner_omegas = self._plan.get("partner_omegas_rad")
@@ -935,6 +1120,10 @@ class ExperimentSequenceController:
             self._go_ack_agents.add(agent_id)
             self._state["go_ack_agents"] = sorted(self._go_ack_agents)
             self._save_status()
+        elif event_name == "GO_SCHEDULED" and trial == 1:
+            self._go_scheduled_events.setdefault(agent_id, copy.deepcopy(event))
+        elif event_name == "PHASE_CORRECTED":
+            self._phase_corrected_agents.add(agent_id)
         elif event_name == "START":
             self._started_agents.add(agent_id)
             self._trial_start_events[agent_id] = copy.deepcopy(event)

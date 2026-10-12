@@ -5,11 +5,15 @@ document.addEventListener('DOMContentLoaded', () => {
     loadWifiConfig();
     loadExperimentConfig();
     loadPhaseSequenceStatus();
-    setInterval(loadPhaseSequenceStatus, 1000);
+    schedulePhaseSequencePoll();
 
     const saveExperimentConfigBtn = document.getElementById('btn-save-experiment-config');
     if (saveExperimentConfigBtn) {
         saveExperimentConfigBtn.addEventListener('click', saveExperimentConfig);
+    }
+    const reloadExperimentConfigBtn = document.getElementById('btn-reload-experiment-config');
+    if (reloadExperimentConfigBtn) {
+        reloadExperimentConfigBtn.addEventListener('click', reloadExperimentConfig);
     }
 
     const saveWifiBtn = document.getElementById('btn-save-wifi');
@@ -178,6 +182,16 @@ async function loadFirmwares() {
     }
 }
 
+let lastFleetRenderSignature = '';
+
+function fleetTelemetryBucket(value, decimals = 2) {
+    if (value === undefined || value === null) return null;
+    const n = Number(value);
+    if (!Number.isFinite(n)) return null;
+    const scale = 10 ** decimals;
+    return Math.round(n * scale) / scale;
+}
+
 // Load fleet registry
 async function loadFleet(silent = false) {
     const list = document.getElementById('fleet-list');
@@ -206,6 +220,26 @@ async function loadFleet(silent = false) {
         }
         
         const usbUids = usbData.usb_uids || [];
+
+        const fleetSignature = JSON.stringify({
+            agents: (data.agents || []).map((a) => ({
+                id: a.id,
+                ip: a.ip,
+                status: a.status,
+                kappa: fleetTelemetryBucket(a.kappa, 2),
+                omega: fleetTelemetryBucket(a.omega, 3),
+                params: a.params,
+                volt: fleetTelemetryBucket(a.volt, 2),
+                src: a.src,
+                zmode: a.zmode,
+            })),
+            usb: usbUids,
+            memos: latestMemos,
+        });
+        if (silent && fleetSignature === lastFleetRenderSignature) {
+            return;
+        }
+        lastFleetRenderSignature = fleetSignature;
         
         const newHtml = document.createElement('div');
         if (!data.agents || data.agents.length === 0) {
@@ -255,9 +289,9 @@ async function loadFleet(silent = false) {
                         <span style="color:${col}; font-weight:600;">${loaded ? 'PARAMS OK' : 'DEFAULTS'}</span>
                         <span style="color:${srcCol}; font-weight:600;">s = ${srcLabel}</span>
                         ${currentOnlyLabel}
-                        <span style="color:#e5e7eb;">κ = <b>${agent.kappa.toFixed(2)}</b></span>
+                        <span style="color:${(phaseSequenceExpectedKappa !== null && Math.abs(agent.kappa - phaseSequenceExpectedKappa) > 0.01) ? '#f87171' : '#e5e7eb'};">κ = <b>${agent.kappa.toFixed(2)}</b>${(phaseSequenceExpectedKappa !== null && Math.abs(agent.kappa - phaseSequenceExpectedKappa) > 0.01) ? ` <span style="color:#fbbf24;">(要 ${phaseSequenceExpectedKappa.toFixed(2)})</span>` : ''}</span>
                         <span style="color:#e5e7eb;">ω = <b>${agent.omega.toFixed(3)}</b> <span style="color:#8b92a5;">(${omegaPi}π)</span></span>
-                        ${loaded ? '' : '<span style="color:#f59e0b;">YAML未取得 — START前にFleet Manager再起動</span>'}
+                        ${loaded ? '' : '<span style="color:#f59e0b;">YAML未取得 — OTA/再起動後に停止状態で待機</span>'}
                     </div>
                 `;
             }
@@ -755,9 +789,43 @@ async function loadExperimentConfig() {
         if (!res.ok) throw new Error(await readApiError(res));
         const data = await res.json();
         applyExperimentConfigToForm(data);
-        setExperimentConfigStatus(`読込: PRC=${data.z_mode || '—'}`, 'ok');
+        const kappaLine = Number.isFinite(Number(data.kappa))
+            ? `シーケンス κ=${Number(data.kappa).toFixed(2)}`
+            : '';
+        if (data.kappa_yaml_aligned === false) {
+            setExperimentConfigStatus(
+                `${kappaLine} — sync YAML κ=${Number(data.sync_yaml_kappa).toFixed(2)} と不一致（「設定を再読込」）`,
+                'warn',
+            );
+        } else {
+            setExperimentConfigStatus(`読込: PRC=${data.z_mode || '—'}${kappaLine ? `, ${kappaLine}` : ''}`, 'ok');
+        }
     } catch (err) {
         setExperimentConfigStatus(`設定読込失敗: ${err.message}`, 'err');
+    }
+}
+
+async function reloadExperimentConfig() {
+    const button = document.getElementById('btn-reload-experiment-config');
+    try {
+        if (button) {
+            button.disabled = true;
+            button.textContent = '読込中…';
+        }
+        setExperimentConfigStatus('YAML を再読込中…', 'busy');
+        const res = await fetch('/api/experiment/reload', { method: 'POST', cache: 'no-store' });
+        if (!res.ok) throw new Error(await readApiError(res));
+        const data = await res.json();
+        applyExperimentConfigToForm(data);
+        setExperimentConfigStatus(data.message || '再読込しました', 'ok');
+        await loadPhaseSequenceStatus();
+    } catch (err) {
+        setExperimentConfigStatus(`再読込失敗: ${err.message}`, 'err');
+    } finally {
+        if (button) {
+            button.disabled = false;
+            button.textContent = '設定を再読込';
+        }
     }
 }
 
@@ -804,16 +872,41 @@ let phaseSequenceAgentIds = [11, 12];
 let phaseSequenceReferenceId = 12;
 let phaseSequencePartnerId = 11;
 let phaseSequenceType = 'phase_sweep';
+let phaseSequenceExpectedKappa = null;
 let phaseSequenceConfirmHint =
     '開始予約後20 s以内に水中へ入れ、電池・防水を確認してください。（最初の動作は30 s後、各試行前に10 s停止、全行程約7分20秒）';
+let phaseSequenceLastStatus = 'idle';
+let phaseSequencePollTimer = null;
+
+function phaseSequencePollIntervalMs() {
+    const tabMonitor = document.getElementById('tab-monitor');
+    const onMonitor = tabMonitor && tabMonitor.style.display !== 'none';
+    const activeLike =
+        phaseSequenceActiveStates.has(phaseSequenceLastStatus) ||
+        phaseSequenceLastStatus === 'preparing' ||
+        phaseSequenceLastStatus === 'armed';
+    if (activeLike) return 1000;
+    if (onMonitor) return 3000;
+    return 8000;
+}
+
+function schedulePhaseSequencePoll() {
+    if (phaseSequencePollTimer) {
+        clearTimeout(phaseSequencePollTimer);
+    }
+    phaseSequencePollTimer = setTimeout(async () => {
+        await loadPhaseSequenceStatus();
+        schedulePhaseSequencePoll();
+    }, phaseSequencePollIntervalMs());
+}
 
 function updatePhaseSequencePanelCopy(data) {
     const titleEl = document.getElementById('phase-sequence-title');
     const descEl = document.getElementById('phase-sequence-description');
-    if (titleEl && data.ui_title) {
+    if (titleEl && data.ui_title && titleEl.textContent !== data.ui_title) {
         titleEl.textContent = data.ui_title;
     }
-    if (descEl && data.ui_description) {
+    if (descEl && data.ui_description && descEl.textContent !== data.ui_description) {
         descEl.textContent = data.ui_description;
     }
     if (data.ui_confirm_hint) {
@@ -869,6 +962,7 @@ async function loadPhaseSequenceStatus() {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
         const status = data.status || 'idle';
+        phaseSequenceLastStatus = status;
         const totalTrials = Number(data.total_trials || 6);
         if (Array.isArray(data.default_agent_ids) && data.default_agent_ids.length === 2) {
             phaseSequenceAgentIds = data.default_agent_ids.map((id) => Number(id));
@@ -880,20 +974,34 @@ async function loadPhaseSequenceStatus() {
             phaseSequencePartnerId = Number(data.phase_partner_agent);
         }
         updatePhaseSequencePanelCopy(data);
-        stateEl.textContent = phaseSequenceStateLabel(status, totalTrials);
-        stateEl.style.color = status === 'error' ? '#ef4444' : (phaseSequenceBlockStartStates.has(status) ? '#f59e0b' : '#94a3b8');
-        if (startBtn) startBtn.disabled = phaseSequenceBlockStartStates.has(status);
-        if (stopBtn) stopBtn.disabled = !phaseSequenceActiveStates.has(status);
+        if (Number.isFinite(Number(data.expected_kappa))) {
+            phaseSequenceExpectedKappa = Number(data.expected_kappa);
+        } else {
+            phaseSequenceExpectedKappa = null;
+        }
+        const stateLabel = phaseSequenceStateLabel(status, totalTrials);
+        if (stateEl.textContent !== stateLabel) {
+            stateEl.textContent = stateLabel;
+        }
+        const stateColor = status === 'error' ? '#ef4444' : (phaseSequenceBlockStartStates.has(status) ? '#f59e0b' : '#94a3b8');
+        if (stateEl.style.color !== stateColor) {
+            stateEl.style.color = stateColor;
+        }
+        const startDisabled = phaseSequenceBlockStartStates.has(status);
+        const stopDisabled = !phaseSequenceActiveStates.has(status);
+        if (startBtn && startBtn.disabled !== startDisabled) startBtn.disabled = startDisabled;
+        if (stopBtn && stopBtn.disabled !== stopDisabled) stopBtn.disabled = stopDisabled;
 
+        let detailText = '';
         if (status === 'error') {
             const acks = Array.isArray(data.go_ack_agents) ? data.go_ack_agents : [];
             const ackText = acks.length
                 ? `受信確認済み: ${acks.map((id) => `#${id}✓`).join(' ')}`
                 : '受信確認なし';
-            detailEl.textContent =
+            detailText =
                 `開始前エラー（自律実行は未開始）｜${ackText}｜${data.error || data.message || '原因不明'}`;
         } else if (status === 'awaiting_upload') {
-            detailEl.textContent = `${totalTrials}条件完了。水上で「STOP ALL」を押してログを一括アップロードしてください`;
+            detailText = `${totalTrials}条件完了。水上で「STOP ALL」を押してログを一括アップロードしてください`;
         } else if (status === 'running_autonomous') {
             const endEpoch = Number(data.robot_motion_end_epoch ?? data.expected_end_epoch);
             if (Number.isFinite(endEpoch)) {
@@ -904,14 +1012,14 @@ async function loadPhaseSequenceStatus() {
                     ? Math.max(0, nowEpoch - startEpoch)
                     : null;
                 if (remaining > 0) {
-                    detailEl.textContent =
+                    detailText =
                         `水中自律実行中｜経過 ${elapsed === null ? '—' : formatSequenceDuration(elapsed)}｜残り ${formatSequenceDuration(remaining)}｜${totalTrials}条件完了で中央停止｜PC通信不要`;
                 } else {
-                    detailEl.textContent =
+                    detailText =
                         `ロボットは${totalTrials}条件完了で停止済み。浮上後に「STOP ALL」でログをアップロードしてください`;
                 }
             } else {
-                detailEl.textContent = data.message || '水中自律実行中。PC通信は不要です';
+                detailText = data.message || '水中自律実行中。PC通信は不要です';
             }
         } else if ((status === 'preparing' || status === 'armed') && data.start_at_epoch) {
             const remaining = Math.max(0, data.start_at_epoch - Date.now() / 1000);
@@ -926,19 +1034,32 @@ async function loadPhaseSequenceStatus() {
                 ? `GO確認: ${acks.map((id) => `#${id}✓`).join(' ')}`
                 : 'GO確認待ち…';
             const totalPreStart = firstDelay + centeredPause;
-            detailEl.textContent =
+            detailText =
                 `${stage}｜最初の動作まで ${formatSequenceDuration(remaining)}（全体 ${formatSequenceDuration(totalPreStart)}）｜${ackText}｜両機サーボが一度動けばOK`;
         } else if (data.current_trial) {
             const condition = data.condition || '';
             if (phaseSequenceType === 'delta_omega_sweep') {
-                detailEl.textContent = `trial ${data.current_trial}/${totalTrials}｜${condition}｜Δωスイープ｜${data.message || ''}`;
+                detailText = `trial ${data.current_trial}/${totalTrials}｜${condition}｜Δωスイープ｜${data.message || ''}`;
             } else {
                 const phase = Number(data.phase_difference_target_rad);
                 const phaseText = Number.isFinite(phase) ? `${phase.toFixed(6)} rad` : '—';
-                detailEl.textContent = `trial ${data.current_trial}/${totalTrials}｜${condition}｜Δφ=${phaseText}｜${data.message || ''}`;
+                detailText = `trial ${data.current_trial}/${totalTrials}｜${condition}｜Δφ=${phaseText}｜${data.message || ''}`;
             }
         } else {
-            detailEl.textContent = data.message || `設定済み：${formatPhaseSequencePairLabel()}｜${totalTrials}条件`;
+            const kappaNote =
+                Number.isFinite(Number(data.expected_kappa))
+                    ? `｜シーケンス κ=${Number(data.expected_kappa).toFixed(2)}`
+                    : '';
+            const kappaWarn =
+                data.kappa_yaml_aligned === false
+                    ? '｜⚠ sync_experiment_params.yaml の κ がシーケンスと不一致'
+                    : '';
+            detailText =
+                data.message || `設定済み：${formatPhaseSequencePairLabel()}｜${totalTrials}条件`;
+            detailText += kappaNote + kappaWarn;
+        }
+        if (detailText && detailEl.textContent !== detailText) {
+            detailEl.textContent = detailText;
         }
     } catch (err) {
         stateEl.textContent = '接続待ち';
@@ -1093,6 +1214,7 @@ function connectTelemetryWs() {
 function updateCharts(data) {
     const agentId = data.id;
     const label = `Robot ${agentId}`;
+    let touchedCharts = false;
     
     // Calculate Power (Voltage * Current)
     let power = 0;
@@ -1132,9 +1254,26 @@ function updateCharts(data) {
         
         dataset.data.push(value);
         dataset.data.shift();
-        
-        charts[key].update();
+        touchedCharts = true;
     }
+    if (touchedCharts) {
+        scheduleChartRedraw();
+    }
+}
+
+let chartRedrawScheduled = false;
+
+function scheduleChartRedraw() {
+    if (chartRedrawScheduled) return;
+    chartRedrawScheduled = true;
+    requestAnimationFrame(() => {
+        chartRedrawScheduled = false;
+        for (const key of Object.keys(charts)) {
+            if (charts[key]) {
+                charts[key].update('none');
+            }
+        }
+    });
 }
 
 // Initialize on load

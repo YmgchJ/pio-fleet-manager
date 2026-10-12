@@ -114,6 +114,40 @@ class LogReceiver:
                 agents.add(int(m.group(1)))
         return agents
 
+    def _expected_agents(self) -> set[int] | None:
+        ctx = self._sequence_context
+        if not ctx:
+            return None
+        raw = ctx.get("agent_ids")
+        if not raw:
+            return None
+        try:
+            expected = {int(value) for value in raw}
+        except (TypeError, ValueError):
+            return None
+        return expected if expected else None
+
+    def _session_ready_to_merge(self) -> bool:
+        """Return True if buffered chunks may be merged into one CSV."""
+        agents_with_chunks = self._agents_from_chunk_paths(self._pending_files)
+        agents_with_log_end = set(self._log_end.keys())
+        fallback_ready = (
+            self._last_log_packet is not None
+            and (time.time() - self._last_log_packet) >= SESSION_MERGE_FALLBACK_SEC
+        )
+        expected = self._expected_agents()
+        if expected:
+            missing_log_end = expected - agents_with_log_end
+            if missing_log_end:
+                return False
+            missing_chunks = expected - agents_with_chunks
+            if missing_chunks and not fallback_ready:
+                return False
+            return bool(agents_with_chunks)
+        return bool(agents_with_chunks) and (
+            agents_with_chunks <= agents_with_log_end or fallback_ready
+        )
+
     @staticmethod
     def _record_size_for_payload(payload_len: int) -> int | None:
         if payload_len > 0 and payload_len % RECORD_SIZE_V7 == 0:
@@ -197,6 +231,14 @@ class LogReceiver:
         status = "OK" if ok else "FAILED"
         print(f"[LOG_END] agent={agent_id} records={records} {status}")
         self.flush_agent(agent_id)
+        with self._lock:
+            expected = self._expected_agents()
+            if expected:
+                missing = expected - set(self._log_end.keys())
+                if missing:
+                    print(
+                        f"[Session] Holding merge until LOG_END from agents {sorted(missing)}"
+                    )
         self._maybe_finalize_session()
 
     def flush_agent(self, agent_id: int) -> Optional[str]:
@@ -287,15 +329,7 @@ class LogReceiver:
                 return
             if not self._pending_files:
                 return
-            agents_with_chunks = self._agents_from_chunk_paths(self._pending_files)
-            agents_with_log_end = set(self._log_end.keys())
-            fallback_ready = (
-                self._last_log_packet is not None
-                and (time.time() - self._last_log_packet) >= SESSION_MERGE_FALLBACK_SEC
-            )
-            should_merge = bool(agents_with_chunks) and (
-                agents_with_chunks <= agents_with_log_end or fallback_ready
-            )
+            should_merge = self._session_ready_to_merge()
 
         if should_merge:
             merged = self.merge_pending()
