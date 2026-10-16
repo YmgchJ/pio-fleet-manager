@@ -632,6 +632,20 @@ async function testServoUsb(uid) {
     }
 }
 
+function appendFleetTerminalLine(text, color = '#a5b4fc') {
+    const terminal = document.getElementById('terminal');
+    if (!terminal) return;
+    const line = document.createElement('div');
+    line.className = 'terminal-line';
+    line.style.color = color;
+    line.textContent = text;
+    terminal.appendChild(line);
+    while (terminal.children.length > 200) {
+        terminal.removeChild(terminal.firstChild);
+    }
+    terminal.scrollTop = terminal.scrollHeight;
+}
+
 // Upload Firmware (WebSocket)
 let ws = null;
 function startUpload(target, value) {
@@ -764,8 +778,24 @@ async function sendGlobalCommand(cmd) {
         if (!res.ok) {
             throw new Error(await readApiError(res));
         }
-        console.log(`Global command ${cmd} sent successfully.`);
+        const data = await res.json();
+        appendFleetTerminalLine(
+            `[CMD] ${cmd} OK — online=${data.unicast_targets} seq=${data.sequence?.status || 'n/a'}`,
+            '#34d399'
+        );
+        const seq = data.sequence;
+        if (cmd === 'STOP' && seq?.status === 'waiting_for_logs') {
+            setExperimentConfigStatus('STOP ALL: ログ一括転送を開始しました', 'busy');
+        } else if (cmd === 'STOP' && seq?.message) {
+            setExperimentConfigStatus(`STOP ALL: ${seq.message}`, 'ok');
+        }
+        const seqMsg = data.sequence?.message || data.sequence?.status || '';
+        setExperimentConfigStatus(
+            `${cmd} 送信 OK（online=${data.unicast_targets}）${seqMsg ? ' — ' + seqMsg : ''}`,
+            'ok'
+        );
     } catch (err) {
+        setExperimentConfigStatus(`STOP/START 失敗: ${err.message}`, 'error');
         alert("コマンド送信に失敗しました: " + err.message);
     }
 }
@@ -1200,6 +1230,10 @@ function connectTelemetryWs() {
     telemetryWs.onmessage = (event) => {
         try {
             const data = JSON.parse(event.data);
+            if (data.type === 'fm_event' && data.line) {
+                appendFleetTerminalLine(data.line, '#c4b5fd');
+                return;
+            }
             updateCharts(data);
         } catch (e) {
             console.error("Failed to parse telemetry:", e);

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import shutil
 import struct
@@ -31,6 +32,33 @@ MERGED_CHUNKS_DIR = DATA_ROOT / "merged_chunks"
 EXPERIMENTS_DIR = DATA_ROOT / "experiments"
 
 CHUNK_AGENT_RE = re.compile(r"chunk_agent_(\d+)_")
+FM_EVENTS_LOG = DATA_ROOT / "fm_events.log"
+_fm_log = logging.getLogger("fm_event")
+_fm_event_listeners: list[Callable[[str], None]] = []
+
+
+def register_fm_event_listener(callback: Callable[[str], None]) -> None:
+    """Optional hook (e.g. WebSocket mirror for the dashboard Terminal)."""
+    if callback not in _fm_event_listeners:
+        _fm_event_listeners.append(callback)
+
+
+def fm_event(message: str) -> None:
+    """Mirror important UDP events to stdout and an append-only audit file."""
+    line = f"{datetime.now().isoformat(timespec='seconds')} {message}"
+    _fm_log.info("%s", message)
+    print(line, flush=True)
+    try:
+        FM_EVENTS_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with FM_EVENTS_LOG.open("a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+    except OSError:
+        pass
+    for listener in _fm_event_listeners:
+        try:
+            listener(line)
+        except Exception:
+            pass
 
 
 class LogReceiver:
@@ -71,7 +99,7 @@ class LogReceiver:
         (self._session_dir / "chunks").mkdir(parents=True, exist_ok=True)
         (self._session_dir / "archive").mkdir(parents=True, exist_ok=True)
         self._metadata.on_session_start(self._session_id, self._session_dir, self._sequence_context)
-        print(f"[Session] Started experiment session {self._session_id}")
+        fm_event(f"[Session] Started experiment session {self._session_id}")
 
     def _reset_session(self) -> None:
         self._session_id = None
@@ -92,12 +120,49 @@ class LogReceiver:
 
     def set_sequence_context(self, context: dict[str, Any] | None) -> None:
         with self._lock:
-            if self._session_id is not None:
-                # A new context is only valid after the previous session has been
-                # merged. Refuse to relabel an active CSV silently.
-                print("[Session] WARN: ignored sequence context while a session is active")
+            if not context:
+                self._sequence_context = None
                 return
-            self._sequence_context = dict(context) if context else None
+            # Buffers may already exist from an on-water auto-upload; still attach
+            # sequence_id / agent_ids so merge + FM completion can run.
+            self._sequence_context = dict(context)
+
+    def snapshot_log_end(self) -> dict[int, tuple[int, bool]]:
+        with self._lock:
+            return {
+                aid: (rec, ok)
+                for aid, (rec, ok, _ts) in self._log_end.items()
+            }
+
+    def find_merged_csv_for_agents(
+        self, agent_ids: set[int], since_epoch: float
+    ) -> Optional[str]:
+        """Latest merged CSV in experiments/ whose archive contains all agents."""
+        if not EXPERIMENTS_DIR.is_dir():
+            return None
+        best: Optional[tuple[float, str]] = None
+        for exp_dir in EXPERIMENTS_DIR.iterdir():
+            if not exp_dir.is_dir():
+                continue
+            merged = exp_dir / f"merged_{exp_dir.name}.csv"
+            if not merged.is_file():
+                continue
+            mtime = merged.stat().st_mtime
+            if mtime < since_epoch:
+                continue
+            archive = exp_dir / "archive"
+            if not archive.is_dir():
+                continue
+            found: set[int] = set()
+            for chunk in archive.glob("chunk_agent_*.csv"):
+                match = CHUNK_AGENT_RE.search(chunk.name)
+                if match:
+                    found.add(int(match.group(1)))
+            if not agent_ids.issubset(found):
+                continue
+            if best is None or mtime > best[0]:
+                best = (mtime, str(merged))
+        return best[1] if best else None
 
     def set_session_merged_callback(
         self,
@@ -187,6 +252,7 @@ class LogReceiver:
         with self._lock:
             self._ensure_session()
             chunk_data, send_list, recv_list = self._buffers.get(agent_id, ([], [], []))
+            was_empty = len(chunk_data) == 0
             if self._last_raw_packet.get(agent_id) == raw:
                 total = len(chunk_data)
             else:
@@ -199,8 +265,10 @@ class LogReceiver:
                 self._last_raw_packet[agent_id] = raw
                 total = len(chunk_data)
 
-        if total <= 72 or total % 360 == 0:
-            print(f"[LOG] agent={agent_id} +{len(records)} records from {addr[0]} (buf={total})")
+        if was_empty and records:
+            fm_event(f"[LOG] 受信開始 agent={agent_id} from {addr[0]} (+{len(records)} rec)")
+        elif total <= 72 or total % 360 == 0:
+            fm_event(f"[LOG] agent={agent_id} +{len(records)} from {addr[0]} (buf={total})")
 
         last = raw[-record_size:]
         if record_size == RECORD_SIZE_V7:
@@ -223,21 +291,30 @@ class LogReceiver:
             # Firmware retries LOG_END up to 5×; after merge we reset the session.
             # Ignore late duplicates that would spawn an empty experiments/ folder.
             if self._session_id is None and agent_id not in self._buffers:
-                print(f"[LOG_END] Ignoring duplicate LOG_END for agent={agent_id} (no active session)")
+                fm_event(f"[LOG_END] Ignoring duplicate for agent={agent_id} (no active session)")
                 return
             self._ensure_session()
             self._log_end[agent_id] = (records, ok, time.time())
             self._metadata.record_log_end(agent_id, records, ok, sequence_id, trial)
         status = "OK" if ok else "FAILED"
-        print(f"[LOG_END] agent={agent_id} records={records} {status}")
+        seq_label = sequence_id or "-"
+        fm_event(
+            f"======== ログ受信完了 agent={agent_id} records={records} {status} "
+            f"seq={seq_label} ========"
+        )
         self.flush_agent(agent_id)
         with self._lock:
             expected = self._expected_agents()
             if expected:
                 missing = expected - set(self._log_end.keys())
                 if missing:
-                    print(
-                        f"[Session] Holding merge until LOG_END from agents {sorted(missing)}"
+                    fm_event(
+                        f"[Session] マージ待ち LOG_END: agents {sorted(missing)}"
+                    )
+                elif expected <= set(self._log_end.keys()):
+                    fm_event(
+                        f"[Session] 両機 LOG_END 揃いました → CSV マージします "
+                        f"(agents {sorted(expected)})"
                     )
         self._maybe_finalize_session()
 
@@ -334,7 +411,8 @@ class LogReceiver:
         if should_merge:
             merged = self.merge_pending()
             if merged:
-                print(f"[Session] Auto-merged experiment CSV: {merged}")
+                fm_event("======== CSV マージ完了 ========")
+                fm_event(f"  path: {merged}")
 
     def check_timeouts(self) -> None:
         now = time.time()

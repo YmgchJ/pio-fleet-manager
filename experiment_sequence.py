@@ -125,7 +125,7 @@ def _sequence_ui_copy(
     open_loop = str(config.get("experiment_mode", "")).lower() == "open_loop_identification"
     autonomous_s = first_delay_s + total_trials * (pause_s + duration_s)
     pair_text = (
-        f"偶数ID {reference_agent}（基準・ω 固定）と奇数ID {partner_agent}（パートナー・ω 変更）のペア。"
+        f"ID {reference_agent}（基準）と ID {partner_agent}（パートナー）のペア。"
     )
     if open_loop:
         timing_text = (
@@ -143,7 +143,7 @@ def _sequence_ui_copy(
         )
     common_tail = (
         "曲げセンサは使用せず、current-only ファームウェアであることを開始前に検査します。"
-        f" Z(ψ)={z_label}（fleet/sync_experiment_params.yaml）。"
+        + ("" if open_loop else f" Z(ψ)={z_label}。")
     )
     if sequence_type == "delta_omega_sweep":
         omega_base = float(config.get("omega_base_rad_s", 3.5 * math.pi))
@@ -151,7 +151,7 @@ def _sequence_ui_copy(
         labels = [str(v) for v in config.get("delta_omega_labels", [])]
         condition_text = ", ".join(labels) if labels else "Δω = 0 … 0.25π"
         analysis_window = (
-            "同定解析は開始・終了端を除く10–130 sを使用。"
+            f"解析窓は {float(config.get('analysis_window_start_s', 10)):g}–{float(config.get('analysis_window_end_s', 130)):g} s。"
             if open_loop
             else "解析窓は各試行の最終60 s（Eq.36 用）。"
             if duration_s >= 120.0
@@ -163,9 +163,12 @@ def _sequence_ui_copy(
             "mid": "中間パドル",
             "big": "大パドル",
         }.get(paddle, paddle)
+        open_loop_title = f"自動実験：{paddle_label}・電流S関数同定・開ループ"
+        if open_loop and total_trials > 1:
+            open_loop_title += f"（{total_trials}×{duration_s:.0f}s）"
         return {
             "ui_title": (
-                f"自動実験：{paddle_label}・電流S関数同定・開ループ"
+                open_loop_title
                 if open_loop
                 else f"自動実験：{paddle_label}・電流同期・Δω両側スイープ{total_trials}条件"
             ),
@@ -177,13 +180,17 @@ def _sequence_ui_copy(
             ),
             "ui_confirm_hint": f"開始予約後{first_delay_s:.0f} s以内に水中へ入れ、電池・防水を確認してください。",
         }
+    paddle_label = {"standard": "40 mm", "mid": "60 mm", "big": "80 mm"}.get(
+        str(config.get("paddle", "big")), str(config.get("paddle", "big"))
+    )
     return {
-        "ui_title": f"自動実験：大パドル・電流同期・初期位相差{total_trials}条件",
+        "ui_title": f"自動実験：{paddle_label}・{'固定位相差・開ループ' if open_loop else '電流同期・初期位相差'}{total_trials}条件",
         "ui_description": (
             f"偶数ID（基準・phase_offset=0）と奇数ID（パートナー・−Δφ）のペアを使用"
             f"（デフォルト {partner_agent} / {reference_agent}）。 {timing_text}"
             f"条件は{total_trials}件を順に自動実行します。"
-            f" {common_tail}"
+            + (f" 両機の指定ωは同じ。解析窓は {float(config.get('analysis_window_start_s', 10)):g}–{float(config.get('analysis_window_end_s', 50)):g} s。" if open_loop else "")
+            + f" {common_tail}"
         ),
         "ui_confirm_hint": f"開始予約後{first_delay_s:.0f} s以内に水中へ入れ、電池・防水を確認してください。",
     }
@@ -375,10 +382,6 @@ class ExperimentSequenceController:
         sequence_type = str(config.get("sequence_type", "phase_sweep")).lower()
         if sequence_type not in ("phase_sweep", "delta_omega_sweep"):
             raise SequenceValidationError(f"unknown sequence_type: {sequence_type}")
-        if open_loop and sequence_type != "delta_omega_sweep":
-            raise SequenceValidationError(
-                "open_loop_identification requires a delta_omega_sweep sequence"
-            )
 
         omega_base_rad_s: float | None = None
         partner_omegas_rad: list[float] | None = None
@@ -431,6 +434,10 @@ class ExperimentSequenceController:
             raise SequenceValidationError(
                 f"analysis_window_end_s={analysis_end_s} exceeds trial duration {trial_end_s}s"
             )
+        analysis_start_s = float(config.get("analysis_window_start_s", 10.0))
+        if not (math.isfinite(analysis_start_s) and math.isfinite(analysis_end_s)
+                and 0 <= analysis_start_s < analysis_end_s <= trial_end_s):
+            raise SequenceValidationError("analysis window must be finite and inside trial duration")
         if feedback_start_ms < 0 or feedback_start_ms >= duration_ms:
             raise SequenceValidationError("feedback_start_ms must be before trial end")
         if first_delay_ms < 0 or first_delay_ms > 3600000:
@@ -514,6 +521,8 @@ class ExperimentSequenceController:
             "sequence_log_hz": sequence_log_hz,
             "save_interval": save_interval,
             "analysis_window_end_s": analysis_end_s,
+            "analysis_window_start_s": analysis_start_s,
+            "research_plan": copy.deepcopy(config.get("research_plan", {})),
         }
         if partner_omegas_rad is not None:
             plan["partner_omegas_rad"] = partner_omegas_rad
@@ -563,6 +572,9 @@ class ExperimentSequenceController:
                 )
             if str(item.get("mode", "")) != "current_only":
                 problems.append(f"ID {agent_id}: current-only ファームウェアではありません")
+            if (validation_plan.get("research_plan", {}).get("id") == "paddle_sync_minimal_v1"
+                    and item.get("interaction_path") != "current_50hz_ma5_rolling_p10_p90"):
+                problems.append(f"ID {agent_id}: 電流前処理がMA5/rolling P10–P90ではないか、確認できません")
             if _as_int(item.get("flex_used")) != 0:
                 problems.append(f"ID {agent_id}: flex_used が 0 ではありません")
             if item.get("kappa") is None:
@@ -638,6 +650,8 @@ class ExperimentSequenceController:
             "phase_labels": list(self._plan["phase_labels"]),
             "parameter_file": self._plan["parameter_file"],
             "sync_params_snapshot": copy.deepcopy(self._plan["sync_params_snapshot"]),
+            "research_plan": copy.deepcopy(self._plan.get("research_plan", {})),
+            "analysis_window_start_s": self._plan.get("analysis_window_start_s", 10.0),
             "sequence_plan_file": str(self._sequence_dir / "sequence_plan.json") if self._sequence_dir else None,
             "sequence_status_file": str(self._status_path) if self._status_path else None,
         }
@@ -667,6 +681,7 @@ class ExperimentSequenceController:
         self._status_path = sequence_dir / "sequence_status.json"
         self._stop_requested = False
         self._trial_failed = False
+        self._merged_event = asyncio.Event()
         total_trials = len(plan["phase_differences_rad"])
         autonomous_duration_s = self._autonomous_duration_s()
         self._state = {
@@ -748,7 +763,7 @@ class ExperimentSequenceController:
             )
             # Short buffer so the UI can flip to awaiting_upload before surfacing.
             await asyncio.sleep(AUTONOMOUS_MARGIN_S)
-            self._merged_event = asyncio.Event()
+            assert self._merged_event is not None
             await asyncio.wait_for(self._merged_event.wait(), timeout=3600.0)
             if self._trial_failed:
                 return
@@ -1028,6 +1043,7 @@ class ExperimentSequenceController:
         sent = 0
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
                 for _ in range(2):
                     for target in self._targets:
                         ip = str(target["ip"])
@@ -1046,6 +1062,12 @@ class ExperimentSequenceController:
                                         "error": str(exc),
                                     }
                                 )
+                    for port in range(5000, 5020):
+                        try:
+                            sock.sendto(b"STOP", ("255.255.255.255", port))
+                            sent += 1
+                        except OSError:
+                            pass
         except OSError as exc:
             self._append_event({"event": "COMMAND_SEND_ERROR", "command": "STOP", "error": str(exc)})
         return sent
@@ -1097,8 +1119,8 @@ class ExperimentSequenceController:
     def _matches_upload(self, sequence_id: str | None) -> bool:
         return (
             self._plan is not None
-            and self._state.get("status") == "waiting_for_logs"
             and sequence_id == self._state.get("sequence_id")
+            and self._state.get("status") in ("waiting_for_logs", "awaiting_upload")
         )
 
     def handle_robot_event(self, agent_id: int, event: dict[str, Any]) -> None:
@@ -1111,6 +1133,14 @@ class ExperimentSequenceController:
             self._trial_upload_done.add(agent_id)
             self._state["upload_done_agents"] = sorted(self._trial_upload_done)
             self._save_status()
+            records = int(event.get("records", 0) or 0)
+            if records > 0:
+                from log_receiver import fm_event
+
+                fm_event(
+                    f"[シーケンス] ID {agent_id} UPLOAD_DONE {records} rec "
+                    f"(seq={sequence_id})"
+                )
             return
         if sequence_id != self._state.get("sequence_id"):
             return
@@ -1143,6 +1173,20 @@ class ExperimentSequenceController:
         self._trial_log_end[agent_id] = {"records": records, "ok": ok, "at": _utc_iso(), "trial": trial}
         self._state["log_end_agents"] = sorted(self._trial_log_end)
         self._save_status()
+        if ok and records > 0:
+            from log_receiver import fm_event
+
+            fm_event(
+                f"[シーケンス] ID {agent_id} LOG_END 登録 {records} rec "
+                f"(seq={sequence_id}, status={self._state.get('status')})"
+            )
+            if self._plan:
+                expected = set(self._plan["agent_ids"])
+                if expected <= set(self._trial_log_end):
+                    fm_event(
+                        "[シーケンス] 両機分 LOG_END 済み。"
+                        "水上で STOP ALL を押すと FM に回収済み登録されます。"
+                    )
         if not ok:
             self._trial_failed = True
             self._set_status(
@@ -1153,6 +1197,102 @@ class ExperimentSequenceController:
             self._send_to_targets("SEQ_ABORT")
             if self._task is not None and not self._task.done():
                 self._task.cancel()
+
+    def _hydrate_log_end_from_events(self) -> None:
+        if self._plan is None:
+            return
+        expected = set(self._plan["agent_ids"])
+        for entry in reversed(self._state.get("event_log", [])):
+            if str(entry.get("event", "")) != "UPLOAD_DONE":
+                continue
+            aid = entry.get("agent_id")
+            if aid is None:
+                continue
+            aid = int(aid)
+            if aid not in expected or aid in self._trial_log_end:
+                continue
+            records = int(entry.get("records", 0) or 0)
+            upload_ok = entry.get("upload_ok", 1)
+            ok = upload_ok in (1, True, "1") and records > 0
+            if not ok:
+                continue
+            self._trial_log_end[aid] = {
+                "records": records,
+                "ok": True,
+                "at": entry.get("received_at", _utc_iso()),
+                "trial": entry.get("trial"),
+            }
+        if self._trial_log_end:
+            self._state["log_end_agents"] = sorted(self._trial_log_end)
+
+    def _import_log_end_from_receiver(self) -> None:
+        if self._plan is None:
+            return
+        snapshot = getattr(self.log_receiver, "snapshot_log_end", None)
+        if not callable(snapshot):
+            return
+        end = snapshot()
+        if not isinstance(end, dict):
+            return
+        for aid, (records, ok) in end.items():
+            if aid not in self._plan["agent_ids"] or aid in self._trial_log_end:
+                continue
+            if records > 0 and ok:
+                self._trial_log_end[aid] = {
+                    "records": records,
+                    "ok": True,
+                    "at": _utc_iso(),
+                    "trial": None,
+                }
+        if self._trial_log_end:
+            self._state["log_end_agents"] = sorted(self._trial_log_end)
+
+    def _try_complete_with_existing_logs(self) -> bool:
+        """Finalize when robots already uploaded during awaiting_upload (water surface)."""
+        from log_receiver import fm_event
+
+        if self._plan is None:
+            return False
+        expected = set(self._plan["agent_ids"])
+        self._hydrate_log_end_from_events()
+        self._import_log_end_from_receiver()
+        if set(self._trial_log_end) != expected:
+            return False
+        if any(not bool(item.get("ok")) for item in self._trial_log_end.values()):
+            return False
+        motion_end = self._state.get("robot_motion_end_epoch") or self._state.get(
+            "expected_end_epoch"
+        )
+        since = float(motion_end) - 300.0 if motion_end else time.time() - 1800.0
+        finder = getattr(self.log_receiver, "find_merged_csv_for_agents", None)
+        merged = finder(expected, since) if callable(finder) else None
+        if not merged:
+            return False
+        session_id = Path(merged).parent.name.replace("merged_", "")
+        if session_id.startswith("20"):
+            pass
+        else:
+            session_id = Path(merged).stem.replace("merged_", "")
+        context = self._sequence_context(str(self._state.get("sequence_id", "")))
+        self.handle_session_merged(session_id, merged, context)
+        total_trials = int(self._state.get("total_trials", 0))
+        summary = ", ".join(
+            f"ID {aid}:{self._trial_log_end[aid]['records']}rec"
+            for aid in sorted(self._trial_log_end)
+        )
+        self._set_status(
+            "completed",
+            completed_at=_utc_iso(),
+            current_trial=total_trials,
+            message=f"{total_trials}条件の一括ログ保存・マージが完了しました",
+        )
+        if self._merged_event is not None:
+            self._merged_event.set()
+        fm_event("======== ログ回収完了（水上自動送信分） ========")
+        fm_event(f"  agents: {summary}")
+        fm_event(f"  merged: {merged}")
+        fm_event(f"  sequence: {self._state.get('sequence_id')}")
+        return True
 
     def handle_session_merged(
         self, session_id: str | None, merged_path: str, context: dict[str, Any] | None
@@ -1189,22 +1329,41 @@ class ExperimentSequenceController:
                         self._append_event({"event": "COPY_SEQUENCE_FILE_ERROR", "file": name, "error": str(exc)})
         if self._merged_event is not None:
             self._merged_event.set()
+        from log_receiver import fm_event
+
+        fm_event("======== ログ回収完了 ========")
+        fm_event(f"  merged: {merged_path}")
+        fm_event(f"  sequence: {self._state.get('sequence_id')}")
 
     async def trigger_upload(self) -> dict[str, Any]:
+        from log_receiver import fm_event
+
         if self._state.get("status") != "awaiting_upload":
             raise SequenceValidationError(
                 "ログのアップロードは予定時刻経過後（awaiting_upload）にのみ開始できます"
             )
-        self._trial_log_end.clear()
-        self._trial_upload_done.clear()
-        self._merged_event = asyncio.Event()
+        if self._merged_event is None:
+            self._merged_event = asyncio.Event()
         sequence_id = str(self._state["sequence_id"])
         upload_context = self._sequence_context(sequence_id)
         upload_context["trial_results"] = copy.deepcopy(self._state.get("trial_results", []))
         self.log_receiver.set_sequence_context(upload_context)
+
+        expected = set(self._plan["agent_ids"]) if self._plan else set()
+        self._hydrate_log_end_from_events()
+        self._import_log_end_from_receiver()
+        if set(self._trial_log_end) == expected and self._try_complete_with_existing_logs():
+            return self.get_status()
+        self._trial_log_end.clear()
+        self._trial_upload_done.clear()
+
         self._set_status(
             "waiting_for_logs",
             message="STOPを送信しました。両機の一括ログアップロード・マージを待っています",
+        )
+        fm_event(
+            f"[SEQ] trigger_upload seq={sequence_id} targets="
+            f"{[t.get('id') for t in self._targets]} (転送待ち)"
         )
         self._send_stop_burst()
         return self.get_status()

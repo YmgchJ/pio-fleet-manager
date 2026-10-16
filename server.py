@@ -9,6 +9,7 @@ import math
 import tempfile
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -23,7 +24,13 @@ import contextlib
 
 import shutil
 
-from log_receiver import LogReceiver, MERGED_CHUNKS_DIR, SAVED_CHUNKS_DIR, EXPERIMENTS_DIR
+from log_receiver import (
+    LogReceiver,
+    MERGED_CHUNKS_DIR,
+    SAVED_CHUNKS_DIR,
+    EXPERIMENTS_DIR,
+    register_fm_event_listener,
+)
 from sync_params import (
     Z_MODES,
     build_param_payload,
@@ -32,7 +39,12 @@ from sync_params import (
     load_sync_params,
     parse_param_payload,
 )
-from experiment_sequence import ExperimentSequenceController, SequenceValidationError
+from experiment_sequence import (
+    ExperimentSequenceController,
+    SequenceValidationError,
+    _resolve_even_odd_pair,
+)
+from paddle_plan import PRESET_IDS, read_preset, activate_preset, recovered_presets
 from wifi_config_store import inject_for_firmware, import_from_pico_robot, load_saved, save as save_wifi_config
 
 # --- UDP Auto-Discovery + high-rate log receiver ---
@@ -113,6 +125,9 @@ def parse_status_message(msg: str, agent_id: int, ip_address: str) -> dict:
     fw_match = re.search(r"fw:([^,\s]+)", msg)
     if fw_match:
         telemetry["fw"] = fw_match.group(1)
+    path_match = re.search(r"(?:^|,)interaction_path:([^,\s]+)", msg)
+    if path_match:
+        telemetry["interaction_path"] = path_match.group(1)
     return telemetry
 
 
@@ -182,6 +197,21 @@ class UdpDiscoveryProtocol(asyncio.DatagramProtocol):
                     log_receiver.record_experiment_event(agent_id, event)
                     if sequence_controller is not None:
                         sequence_controller.handle_robot_event(agent_id, event)
+                    ev = str(event.get("event", ""))
+                    if ev == "UPLOAD":
+                        from log_receiver import fm_event
+
+                        fm_event(
+                            f"[ログ] agent={agent_id} 転送開始 seq={event.get('seq', '')}"
+                        )
+                    elif ev == "UPLOAD_DONE":
+                        from log_receiver import fm_event
+
+                        fm_event(
+                            f"======== agent={agent_id} 転送完了 UPLOAD_DONE "
+                            f"records={event.get('records', -1)} "
+                            f"seq={event.get('seq', '')} ========"
+                        )
                 return
             if msg.startswith("LOG_END,"):
                 id_m = re.search(r"id:(\d+)", msg)
@@ -225,6 +255,7 @@ class UdpDiscoveryProtocol(asyncio.DatagramProtocol):
                         "flex_used": telemetry.get("flex_used"),
                         "mode": telemetry.get("mode"),
                         "fw": telemetry.get("fw"),
+                        "interaction_path": telemetry.get("interaction_path"),
                         "ip": ip_address,
                         "last_seen": telemetry["timestamp"],
                     }
@@ -286,6 +317,14 @@ async def lifespan(app: FastAPI):
         ],
     )
     log_receiver.set_session_merged_callback(sequence_controller.handle_session_merged)
+
+    def _mirror_fm_event_to_dashboard(line: str) -> None:
+        broadcast_telemetry({"type": "fm_event", "line": line})
+
+    register_fm_event_listener(_mirror_fm_event_to_dashboard)
+    from log_receiver import fm_event
+
+    fm_event("Fleet Manager 起動完了（ログはこのターミナルと data/fm_events.log に出ます）")
     
     discovery_task = asyncio.create_task(discovery_loop(transport))
     chunk_task = asyncio.create_task(chunk_timeout_loop())
@@ -403,9 +442,10 @@ def _update_prc_mode(current_sync: dict, z_mode: str) -> dict:
 app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "static")), name="static")
 
 @app.get("/")
-def redirect_to_static():
+def redirect_to_static(request: Request):
     from fastapi.responses import RedirectResponse
-    return RedirectResponse(url="/static/index.html")
+    query = f"?{request.url.query}" if request.url.query else ""
+    return RedirectResponse(url=f"/static/index.html{query}")
 
 # --- Models ---
 class AgentData(BaseModel):
@@ -446,7 +486,72 @@ class ExperimentConfigRequest(BaseModel):
     """Web UI exposes PRC (z_mode) only; sequence YAML is edited offline."""
     z_mode: str = "zopt"
 
+
+class PaddlePresetRequest(BaseModel):
+    preset_id: str
+
 # --- Endpoints ---
+
+def _paddle_agent_pair_label(sequence: dict) -> tuple[list[int], str]:
+    agents = [int(a) for a in sequence.get("agents", [13, 12])]
+    if len(agents) != 2:
+        return agents, "φ偶−φ奇"
+    ref, partner = _resolve_even_odd_pair(agents)
+    return agents, f"φ{ref}−φ{partner}"
+
+
+@app.get("/api/experiment/paddle-plan")
+def get_paddle_plan():
+    sequence = _read_yaml_path(_sequence_config_path())
+    agent_ids, phase_delta_label = _paddle_agent_pair_label(sequence)
+    recovered = recovered_presets(EXPERIMENTS_DIR)
+    status = sequence_controller.get_status().get("status", "idle") if sequence_controller else "unavailable"
+    busy = sequence_controller is not None and status in sequence_controller.ACTIVE_STATES | {"awaiting_upload"}
+    readiness = "実機の停止状態とパラメータを確認してください"
+    ready = False
+    if sequence_controller is not None and not busy:
+        try:
+            plan = sequence_controller._load_plan(None)
+            sequence_controller._validate_targets(plan["agent_ids"], plan)
+            readiness = (
+                f"ID {agent_ids[0]} / {agent_ids[1]} の停止・current-only・κ・ω・PRCを確認済み"
+            )
+            ready = True
+        except (SequenceValidationError, OSError, ValueError) as exc:
+            readiness = str(exc)
+    presets = []
+    for preset_id in PRESET_IDS:
+        config, _ = read_preset(preset_id)
+        presets.append({**config["research_plan"], "recovered_sessions": recovered.get(preset_id, [])})
+    return {
+        "active": sequence.get("research_plan", {}).get("preset_id"),
+        "busy": bool(busy), "status": status, "presets": presets,
+        "phase_labels": sequence.get("phase_labels", []),
+        "agent_ids": agent_ids,
+        "phase_delta_label": phase_delta_label,
+        "ready": ready, "readiness": readiness,
+    }
+
+
+@app.post("/api/experiment/paddle-plan/select")
+async def select_paddle_preset(req: PaddlePresetRequest):
+    # No await between checking state and replacing files: START cannot interleave.
+    if sequence_controller is not None:
+        status = sequence_controller.get_status().get("status")
+        if status in sequence_controller.ACTIVE_STATES | {"awaiting_upload"}:
+            raise HTTPException(status_code=409, detail="実行中・ログ回収待ちは条件を切り替えられません")
+    try:
+        backup = activate_preset(req.preset_id, _sequence_config_path(), SYNC_PARAMS_PATH,
+                                  EXPERIMENTS_DIR.parent / "paddle_plan_backups")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"設定を保存できません: {exc}") from exc
+    invalidate_sync_params_cache()
+    if sequence_controller is not None:
+        sequence_controller._state = {"status": "idle"}
+    return {"status": "prepared", "backup": str(backup),
+            "message": "条件を準備しました。実機への開始指令は送信していません。", **get_paddle_plan()}
 
 @app.get("/api/ports")
 def get_serial_ports():
@@ -639,6 +744,8 @@ def get_fleet():
             a["zmode"] = state.get("zmode")
             a["flex_used"] = state.get("flex_used")
             a["mode"] = state.get("mode")
+            a["fw"] = state.get("fw")
+            a["interaction_path"] = state.get("interaction_path")
         else:
             a["volt"] = None
             a["status"] = "offline"
@@ -649,6 +756,8 @@ def get_fleet():
             a["zmode"] = None
             a["flex_used"] = None
             a["mode"] = None
+            a["fw"] = None
+            a["interaction_path"] = None
             
     return data
 
@@ -769,7 +878,7 @@ def _agents_with_ips(online_only: bool = True) -> list[dict]:
                 entry["ip"] = state["ip"]
             if state.get("paused") is not None:
                 entry["paused"] = state["paused"]
-            for field in ("params", "src", "zmode", "flex_used", "mode", "kappa", "omega"):
+            for field in ("params", "src", "zmode", "flex_used", "mode", "kappa", "omega", "fw", "interaction_path"):
                 if state.get(field) is not None:
                     entry[field] = state[field]
             online.append(entry)
@@ -791,15 +900,38 @@ async def send_global_command(req: GlobalCommandRequest):
     if req.command not in ["START", "STOP"]:
         raise HTTPException(status_code=400, detail="Invalid command")
 
+    seq_hint = (
+        sequence_controller.get_status().get("status", "n/a")
+        if sequence_controller is not None
+        else "no-controller"
+    )
+    from log_receiver import fm_event
+
+    fm_event(f"[CMD] HTTP {req.command} (sequence={seq_hint})")
+
+    sequence_action: dict[str, Any] | None = None
     if sequence_controller is not None:
         seq_status = sequence_controller.get_status().get("status")
-        if seq_status == "awaiting_upload" and req.command == "STOP":
-            return await sequence_controller.trigger_upload()
-        if seq_status in sequence_controller.ACTIVE_STATES:
-            if req.command == "START":
-                raise HTTPException(status_code=409, detail="位相差シーケンス実行中です")
-            if req.command == "STOP":
+        if req.command == "STOP":
+            if seq_status == "awaiting_upload":
+                sequence_action = await sequence_controller.trigger_upload()
+            elif seq_status == "completed":
+                fm_event("[CMD] STOP ALL: シーケンスは既に completed（回収済み）です")
+                sequence_action = sequence_controller.get_status()
+            elif seq_status == "stopped":
+                fm_event(
+                    f"[CMD] STOP ALL: シーケンスは stopped です。"
+                    " ログ回収待ちなら「自動シーケンス開始」後の完了まで待ってから再度 STOP ALL"
+                )
+                sequence_action = sequence_controller.get_status()
+            elif seq_status in sequence_controller.ACTIVE_STATES:
                 await sequence_controller.stop()
+                sequence_action = sequence_controller.get_status()
+            elif seq_status == "waiting_for_logs":
+                fm_event("[CMD] STOP ALL: 既にログ転送待ちです（UDP STOP も送信します）")
+                sequence_action = sequence_controller.get_status()
+        elif req.command == "START" and seq_status in sequence_controller.ACTIVE_STATES:
+            raise HTTPException(status_code=409, detail="位相差シーケンス実行中です")
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
@@ -824,16 +956,19 @@ async def send_global_command(req: GlobalCommandRequest):
             for port in range(5000, 5020):
                 _send_udp(sock, req.command.encode("utf-8"), "255.255.255.255", port)
             time.sleep(0.05)
-        print(
+        fm_event(
             f"[CMD] {req.command} -> online=[{', '.join(target_desc) or 'none'}] "
             f"unicast_ok={sent_unicast} + broadcast"
         )
-        return {
+        body: dict[str, Any] = {
             "status": "success",
             "command": req.command,
             "unicast_targets": len(agents),
             "unicast_packets_ok": sent_unicast,
         }
+        if sequence_action is not None:
+            body["sequence"] = sequence_action
+        return body
     except Exception as e:
         print(f"[CMD] {req.command} failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -860,10 +995,15 @@ async def start_experiment_sequence(req: PhaseSequenceStartRequest):
 
 @app.post("/api/experiment/sequence/stop")
 async def stop_experiment_sequence():
+    from log_receiver import fm_event
+
+    fm_event("[CMD] HTTP シーケンス停止（赤い STOP ALL ではありません）")
     if sequence_controller is None:
         raise HTTPException(status_code=503, detail="実験シーケンス機能は起動完了後に利用できます")
     try:
-        return await sequence_controller.stop()
+        status = await sequence_controller.stop()
+        fm_event(f"[CMD] シーケンス停止完了 status={status.get('status')}")
+        return status
     except SequenceValidationError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except Exception as exc:
