@@ -1,0 +1,11 @@
+# Copy to local/agents.yaml and replace the example values.
+# UID and IP must match your own robots; this example contains no real device IDs.
+agents:
+  - id: 1
+    uid: REPLACE_WITH_DEVICE_UID
+    hostname: robot-01
+    ip: 192.0.2.11
+server:
+  ip: 192.0.2.10
+  status_port: 5000
+  command_base_port: 5000

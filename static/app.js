@@ -1,3 +1,26 @@
+let firmwareUploadProfile = {
+    pio_ota_env: 'ota',
+    pio_usb_env: 'pico_w',
+    summary: '電流専用（ota）',
+};
+
+async function refreshFirmwareUploadProfile() {
+    try {
+        const res = await fetch('/api/firmware/upload-profile', { cache: 'no-store' });
+        if (res.ok) {
+            firmwareUploadProfile = await res.json();
+        }
+    } catch (_) {
+        /* keep previous profile */
+    }
+    const el = document.getElementById('firmware-upload-profile');
+    if (el) {
+        el.textContent = firmwareUploadProfile.summary
+            ? `次回 Flash/OTA: ${firmwareUploadProfile.summary}`
+            : '';
+    }
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     loadFirmwares();
     loadFleet();
@@ -6,6 +29,7 @@ document.addEventListener('DOMContentLoaded', () => {
     loadExperimentConfig();
     loadPhaseSequenceStatus();
     schedulePhaseSequencePoll();
+    refreshFirmwareUploadProfile();
 
     const saveExperimentConfigBtn = document.getElementById('btn-save-experiment-config');
     if (saveExperimentConfigBtn) {
@@ -22,7 +46,11 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     
     document.getElementById('btn-batch-ota').addEventListener('click', async () => {
-        if (!confirm("オンラインの全機体に一括でOTA書き込みを開始しますか？（順番に処理されます）")) return;
+        await refreshFirmwareUploadProfile();
+        const buildLine = firmwareUploadProfile.summary || firmwareUploadProfile.pio_ota_env;
+        if (!confirm(
+            `オンラインの全機体に一括 OTA します（順番処理）。\nビルド: ${buildLine}\n続行しますか？`
+        )) return;
         
         try {
             const res = await fetch('/api/fleet');
@@ -51,11 +79,11 @@ function setWifiStatus(text, kind = 'muted') {
     const barEl = document.getElementById('wifi-status-bar');
     if (!statusEl) return;
     const colors = {
-        ok: '#34d399',
-        warn: '#fbbf24',
-        err: '#f87171',
-        muted: '#94a3b8',
-        busy: '#60a5fa',
+        ok: '#006e54',
+        warn: '#806000',
+        err: '#b00020',
+        muted: '#626264',
+        busy: '#0017c1',
     };
     const backgrounds = {
         ok: 'rgba(52, 211, 153, 0.12)',
@@ -200,24 +228,12 @@ async function loadFleet(silent = false) {
     }
     
     try {
-        const [fleetRes, usbRes, recordsRes] = await Promise.all([
+        const [fleetRes, usbRes] = await Promise.all([
             fetch('/api/fleet'),
-            fetch('/api/fleet/usb_devices'),
-            fetch('/api/records').catch(() => null)
+            fetch('/api/fleet/usb_devices')
         ]);
         const data = await fleetRes.json();
         const usbData = await usbRes.json();
-        
-        let latestMemos = {};
-        if (recordsRes && recordsRes.ok) {
-            const recordsData = await recordsRes.json();
-            if (recordsData && recordsData.records) {
-                // Assuming chronologically ordered, the last one seen is the latest
-                recordsData.records.forEach(r => {
-                    latestMemos[parseInt(r.robot_id)] = r.memo;
-                });
-            }
-        }
         
         const usbUids = usbData.usb_uids || [];
 
@@ -234,7 +250,6 @@ async function loadFleet(silent = false) {
                 zmode: a.zmode,
             })),
             usb: usbUids,
-            memos: latestMemos,
         });
         if (silent && fleetSignature === lastFleetRenderSignature) {
             return;
@@ -257,13 +272,17 @@ async function loadFleet(silent = false) {
             
             // Build mini status for header
             miniStatusHtml += `
-                <div onclick="document.getElementById('card-${agent.id}').scrollIntoView({behavior: 'smooth', block: 'center'})" style="cursor: pointer; display: flex; align-items: center; gap: 0.4rem; background: rgba(255,255,255,0.05); padding: 0.25rem 0.5rem; border-radius: 6px; font-size: 0.75rem; border: 1px solid ${(isOnline || isUsbConnected) ? 'rgba(255,255,255,0.1)' : 'rgba(255,255,255,0.02)'}; opacity: ${(isOnline || isUsbConnected) ? '1' : '0.5'}; transition: all 0.2s ease;" onmouseover="this.style.background='rgba(255,255,255,0.1)'" onmouseout="this.style.background='rgba(255,255,255,0.05)'">
-                    <span style="font-weight: 600; color: #fff;">ID:${agent.id}</span>
-                    <span style="color: ${isUsbConnected ? '#10b981' : '#4b5563'}; font-weight: bold;">USB</span>
-                    <span style="color: ${isOnline ? '#3b82f6' : '#4b5563'}; font-weight: bold;">OTA</span>
+                <div class="fm-agent-status ${isOnline ? 'fm-agent-online' : ''}" onclick="document.getElementById('card-${agent.id}').scrollIntoView({behavior: 'smooth', block: 'center'})" title="ID ${agent.id}：${isOnline ? 'OTA接続中' : 'OTA未接続'}" style="cursor:pointer;display:flex;align-items:center;gap:0.4rem;">
+                    <span class="fm-agent-id">ID:${agent.id}</span>
+                    <span class="fm-link-state fm-link-icon ${isUsbConnected ? 'fm-usb-connected' : 'fm-disconnected'}" role="img" aria-label="${isUsbConnected ? 'USB接続中' : 'USB未接続'}" title="${isUsbConnected ? 'USB接続中' : 'USB未接続'}">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M12 20V4m-3 3 3-3 3 3M12 15l-5-4V8m5 5 5-4V6"/><circle cx="12" cy="20" r="1.4"/><circle cx="7" cy="7" r="1.2"/><path d="M15.5 3.5h3v3h-3z"/></svg>
+                    </span>
+                    <span class="fm-link-state fm-link-icon ${isOnline ? 'fm-ota-connected' : 'fm-disconnected'}" role="img" aria-label="${isOnline ? 'OTA接続中' : 'OTA未接続'}" title="${isOnline ? 'OTA接続中' : 'OTA未接続'}">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M3 8a15 15 0 0 1 18 0M6 12a10 10 0 0 1 12 0M9 16a5 5 0 0 1 6 0"/><circle cx="12" cy="20" r="1" fill="currentColor" stroke="none"/></svg>
+                    </span>
                 </div>
             `;
-            
+
             const statusClass = isOnline ? 'online' : '';
             const statusText = isOnline ? 'Wi-Fi接続済' : 'オフライン';
 
@@ -277,21 +296,21 @@ async function loadFleet(silent = false) {
             let syncParamsHtml = '';
             if (agent.kappa !== undefined && agent.kappa !== null) {
                 const loaded = agent.params === 1;
-                const col = loaded ? '#10b981' : '#f59e0b';
+                const col = loaded ? '#006e54' : '#806000';
                 const omegaPi = (agent.omega / Math.PI).toFixed(2);
                 const srcLabel = agent.src === 1 ? '電流' : '曲げ';
                 const srcCol = agent.src === 1 ? '#eb6834' : '#1baf7a';
                 const currentOnlyLabel = agent.mode === 'current_only' && agent.flex_used === 0
-                    ? '<span style="color:#34d399; font-weight:600;">FLEX OFF</span>'
-                    : '<span style="color:#ef4444; font-weight:600;">FLEX CHECK</span>';
+                    ? '<span style="color:#006e54; font-weight:600;">FLEX OFF</span>'
+                    : '<span style="color:#b00020; font-weight:600;">FLEX CHECK</span>';
                 syncParamsHtml = `
                     <div style="margin-top: 0.5rem; display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; font-size: 0.8rem; background: rgba(255,255,255,0.03); border: 1px solid ${col}44; border-left: 3px solid ${col}; border-radius: 6px; padding: 0.4rem 0.6rem;">
                         <span style="color:${col}; font-weight:600;">${loaded ? 'PARAMS OK' : 'DEFAULTS'}</span>
                         <span style="color:${srcCol}; font-weight:600;">s = ${srcLabel}</span>
                         ${currentOnlyLabel}
-                        <span style="color:${(phaseSequenceExpectedKappa !== null && Math.abs(agent.kappa - phaseSequenceExpectedKappa) > 0.01) ? '#f87171' : '#e5e7eb'};">κ = <b>${agent.kappa.toFixed(2)}</b>${(phaseSequenceExpectedKappa !== null && Math.abs(agent.kappa - phaseSequenceExpectedKappa) > 0.01) ? ` <span style="color:#fbbf24;">(要 ${phaseSequenceExpectedKappa.toFixed(2)})</span>` : ''}</span>
-                        <span style="color:#e5e7eb;">ω = <b>${agent.omega.toFixed(3)}</b> <span style="color:#8b92a5;">(${omegaPi}π)</span></span>
-                        ${loaded ? '' : '<span style="color:#f59e0b;">YAML未取得 — OTA/再起動後に停止状態で待機</span>'}
+                        <span style="color:${(phaseSequenceExpectedKappa !== null && Math.abs(agent.kappa - phaseSequenceExpectedKappa) > 0.01) ? '#b00020' : '#1a1a1c'};">κ = <b>${agent.kappa.toFixed(2)}</b>${(phaseSequenceExpectedKappa !== null && Math.abs(agent.kappa - phaseSequenceExpectedKappa) > 0.01) ? ` <span style="color:#806000;">(要 ${phaseSequenceExpectedKappa.toFixed(2)})</span>` : ''}</span>
+                        <span style="color:#1a1a1c;">ω = <b>${agent.omega.toFixed(3)}</b> <span style="color:#626264;">(${omegaPi}π)</span></span>
+                        ${loaded ? '' : '<span style="color:#806000;">YAML未取得 — OTA/再起動後に停止状態で待機</span>'}
                     </div>
                 `;
             }
@@ -301,7 +320,7 @@ async function loadFleet(silent = false) {
                 if (agent.volt < 0) {
                     // I2C sensor not found
                     batteryHtml = `
-                        <div style="display: flex; align-items: center; gap: 0.3rem; font-size: 0.75rem; font-weight: 500; color: #8b92a5; background: rgba(255,255,255,0.05); padding: 0.2rem 0.6rem; border-radius: 1rem; border: 1px dashed rgba(255,255,255,0.2);">
+                        <div style="display: flex; align-items: center; gap: 0.3rem; font-size: 0.75rem; font-weight: 500; color: #626264; background: rgba(255,255,255,0.05); padding: 0.2rem 0.6rem; border-radius: 1rem; border: 1px dashed rgba(255,255,255,0.2);">
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                 <circle cx="12" cy="12" r="10"></circle>
                                 <line x1="12" y1="8" x2="12" y2="12"></line>
@@ -313,7 +332,7 @@ async function loadFleet(silent = false) {
                 } else if (agent.volt === 0.0) {
                     // Sensor alive but battery unplugged
                     batteryHtml = `
-                        <div style="display: flex; align-items: center; gap: 0.3rem; font-size: 0.75rem; font-weight: 500; color: #ef4444; background: rgba(239,68,68,0.1); padding: 0.2rem 0.6rem; border-radius: 1rem; border: 1px solid rgba(239,68,68,0.3);">
+                        <div style="display: flex; align-items: center; gap: 0.3rem; font-size: 0.75rem; font-weight: 500; color: #b00020; background: rgba(239,68,68,0.1); padding: 0.2rem 0.6rem; border-radius: 1rem; border: 1px solid rgba(239,68,68,0.3);">
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                 <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
                                 <line x1="12" y1="9" x2="12" y2="13"></line>
@@ -324,9 +343,9 @@ async function loadFleet(silent = false) {
                     `;
                 } else {
                     const pct = Math.max(0, Math.min(100, Math.round((agent.volt - 3.2) / (4.2 - 3.2) * 100)));
-                    let batColor = '#10b981'; // green
-                    if (pct < 20) batColor = '#ef4444'; // red
-                    else if (pct < 50) batColor = '#f59e0b'; // orange
+                    let batColor = '#006e54'; // green
+                    if (pct < 20) batColor = '#b00020'; // red
+                    else if (pct < 50) batColor = '#806000'; // orange
                     
                     batteryHtml = `
                         <div style="display: flex; align-items: center; gap: 0.3rem; font-size: 0.75rem; font-weight: 500; color: ${batColor}; background: rgba(255,255,255,0.05); padding: 0.2rem 0.6rem; border-radius: 1rem; border: 1px solid rgba(255,255,255,0.1);">
@@ -355,32 +374,32 @@ async function loadFleet(silent = false) {
                 </div>
                 ${syncParamsHtml}
                 <div style="width: 100%;">
-                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: 0.2rem;">
+                    <div class="fm-device-connections" style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: 0.2rem;">
                         
                         <!-- Column 1: USB (Wired) -->
                         <div style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; padding: 0.75rem; display: flex; flex-direction: column; gap: 0.6rem;">
-                            <div style="display: flex; justify-content: space-between; align-items: center;">
-                                <div style="font-size: 0.75rem; color: #8b92a5; font-weight: 600; letter-spacing: 0.05em;">USB (WIRED)</div>
-                                <div style="display: flex; align-items: center; gap: 0.3rem; font-size: 0.7rem; color: ${isUsbConnected ? '#10b981' : '#6b7280'}; font-weight: 500;">
-                                    <span style="display:inline-block; width:6px; height:6px; border-radius:50%; background-color: ${isUsbConnected ? '#10b981' : '#4b5563'}; box-shadow: ${isUsbConnected ? '0 0 6px rgba(16,185,129,0.8)' : 'none'};"></span>
+                            <div class="fm-connection-heading" style="display: flex; justify-content: space-between; align-items: center;">
+                                <div style="font-size: 0.75rem; color: #626264; font-weight: 600; letter-spacing: 0.05em;">USB (WIRED)</div>
+                                <div style="display: flex; align-items: center; gap: 0.3rem; font-size: 0.7rem; color: ${isUsbConnected ? '#006e54' : '#6b7280'}; font-weight: 500;">
+                                    <span style="display:inline-block; width:6px; height:6px; border-radius:50%; background-color: ${isUsbConnected ? '#006e54' : '#4b5563'}; box-shadow: ${isUsbConnected ? '0 0 6px rgba(16,185,129,0.8)' : 'none'};"></span>
                                     ${isUsbConnected ? 'Connected' : 'Offline'}
                                 </div>
                             </div>
-                            <button class="btn" style="background: #10b981; color: white; padding: 0.4rem 0.5rem; font-size: 0.8rem; border: none;" onclick="startUpload('usb', 'auto')" ${!isUsbConnected ? 'disabled' : ''}>Flash Firmware</button>
-                            <button class="btn" style="background: transparent; border: 1px solid #10b981; color: #10b981; padding: 0.4rem 0.5rem; font-size: 0.8rem;" onclick="testServoUsb('${agent.uid}')" ${!isUsbConnected ? 'disabled' : ''}>Test Servo</button>
+                            <button class="btn" style="background: #006e54; color: white; padding: 0.4rem 0.5rem; font-size: 0.8rem; border: none;" onclick="startUpload('usb', 'auto')" ${!isUsbConnected ? 'disabled' : ''}>Flash Firmware</button>
+                            <button class="btn" style="background: transparent; border: 1px solid #006e54; color: #006e54; padding: 0.4rem 0.5rem; font-size: 0.8rem;" onclick="testServoUsb('${agent.uid}')" ${!isUsbConnected ? 'disabled' : ''}>Test Servo</button>
                         </div>
 
                         <!-- Column 2: Wi-Fi (OTA) -->
                         <div style="background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; padding: 0.75rem; display: flex; flex-direction: column; gap: 0.6rem;">
-                            <div style="display: flex; justify-content: space-between; align-items: center;">
-                                <div style="font-size: 0.75rem; color: #8b92a5; font-weight: 600; letter-spacing: 0.05em;">Wi-Fi (OTA)</div>
-                                <div style="display: flex; align-items: center; gap: 0.3rem; font-size: 0.7rem; color: ${isOnline ? '#3b82f6' : '#6b7280'}; font-weight: 500;">
-                                    <span style="display:inline-block; width:6px; height:6px; border-radius:50%; background-color: ${isOnline ? '#3b82f6' : '#4b5563'}; box-shadow: ${isOnline ? '0 0 6px rgba(59,130,246,0.8)' : 'none'};"></span>
+                            <div class="fm-connection-heading" style="display: flex; justify-content: space-between; align-items: center;">
+                                <div style="font-size: 0.75rem; color: #626264; font-weight: 600; letter-spacing: 0.05em;">Wi-Fi (OTA)</div>
+                                <div style="display: flex; align-items: center; gap: 0.3rem; font-size: 0.7rem; color: ${isOnline ? '#0017c1' : '#6b7280'}; font-weight: 500;">
+                                    <span style="display:inline-block; width:6px; height:6px; border-radius:50%; background-color: ${isOnline ? '#0017c1' : '#4b5563'}; box-shadow: ${isOnline ? '0 0 6px rgba(59,130,246,0.8)' : 'none'};"></span>
                                     ${isOnline ? 'Connected' : (hasIp ? 'Offline (IP保持)' : 'Offline')}
                                 </div>
                             </div>
-                            <button class="btn" style="background: #3b82f6; color: white; padding: 0.4rem 0.5rem; font-size: 0.8rem; border: none;" onclick="startUpload('ota', '${agent.ip}')" ${!isOnline ? 'disabled' : ''}>Flash Firmware</button>
-                            <button class="btn" style="background: transparent; border: 1px solid #3b82f6; color: #3b82f6; padding: 0.4rem 0.5rem; font-size: 0.8rem;" onclick="testServo(${agent.id}, '${agent.ip}')" ${!isOnline ? 'disabled' : ''}>Test Servo</button>
+                            <button class="btn" style="background: #0017c1; color: white; padding: 0.4rem 0.5rem; font-size: 0.8rem; border: none;" onclick="startUpload('ota', '${agent.ip}')" ${!isOnline ? 'disabled' : ''}>Flash Firmware</button>
+                            <button class="btn" style="background: transparent; border: 1px solid #0017c1; color: #0017c1; padding: 0.4rem 0.5rem; font-size: 0.8rem;" onclick="testServo(${agent.id}, '${agent.ip}')" ${!isOnline ? 'disabled' : ''}>Test Servo</button>
                         </div>
                         
                     </div>
@@ -389,34 +408,34 @@ async function loadFleet(silent = false) {
             newHtml.appendChild(card);
         });
         
-        // Update the Latest Memos panel in the sidebar
-        const memosPanel = document.getElementById('latest-memos-list');
-        if (memosPanel) {
-            if (Object.keys(latestMemos).length === 0) {
-                memosPanel.innerHTML = '<div style="text-align: center; padding: 1rem;">まだ記録がありません</div>';
-            } else {
-                let memosHtml = '';
-                // Sort keys numerically
-                const sortedIds = Object.keys(latestMemos).sort((a,b) => parseInt(a) - parseInt(b));
-                sortedIds.forEach(id => {
-                    memosHtml += `
-                        <div style="background: #111827; border: 1px solid rgba(255,255,255,0.05); padding: 0.5rem; border-radius: 6px;">
-                            <div style="display: flex; justify-content: space-between; margin-bottom: 0.2rem;">
-                                <span style="color: #60a5fa; font-weight: bold;">#${id}</span>
-                            </div>
-                            <div style="color: #fbbf24;">${latestMemos[id]}</div>
-                        </div>
-                    `;
-                });
-                memosPanel.innerHTML = memosHtml;
+        // Sort the registry cards only. Header badges keep their existing order.
+        const connectedIds = new Set(data.agents
+            .filter(agent => agent.status === 'online' || usbUids.includes(String(agent.uid || '').toUpperCase()))
+            .map(agent => Number(agent.id)));
+        const sortedCards = Array.from(newHtml.children).sort((left, right) => {
+            const leftId = Number(left.id.replace('card-', ''));
+            const rightId = Number(right.id.replace('card-', ''));
+            return Number(connectedIds.has(rightId)) - Number(connectedIds.has(leftId)) || leftId - rightId;
+        });
+        const registryItems = [];
+        let previousConnected = null;
+        for (const card of sortedCards) {
+            const connected = connectedIds.has(Number(card.id.replace('card-', '')));
+            if (previousConnected === true && !connected) {
+                const divider = document.createElement('hr');
+                divider.className = 'fm-connection-divider';
+                divider.setAttribute('aria-label', '接続中と未接続の区切り');
+                registryItems.push(divider);
             }
+            registryItems.push(card);
+            previousConnected = connected;
         }
-        
+        newHtml.replaceChildren(...registryItems);
         list.innerHTML = newHtml.innerHTML;
         document.getElementById('global-fleet-status').innerHTML = miniStatusHtml;
     } catch (err) {
         if (!silent) {
-            list.innerHTML = `<div class="empty-state" style="color: #ef4444;">台帳の読み込みに失敗しました: ${err}</div>`;
+            list.innerHTML = `<div class="empty-state" style="color: #b00020;">台帳の読み込みに失敗しました: ${err}</div>`;
         }
     }
 }
@@ -492,7 +511,7 @@ document.getElementById('btn-scan').addEventListener('click', async () => {
                     <p style="font-size: 0.85rem; margin-top: 0.5rem; margin-bottom: 0;">現在の機体番号 (ID): ${data.agent_id}</p>
                     
                     <div style="margin-top: 1rem; padding-top: 1rem; border-top: 1px solid rgba(255,255,255,0.1);">
-                        <label style="font-size: 0.85rem; color: #8b92a5;">機体番号を変更する</label>
+                        <label style="font-size: 0.85rem; color: #626264;">機体番号を変更する</label>
                         <div style="display: flex; gap: 0.5rem; margin-top: 0.5rem;">
                             <input type="number" id="change-id-val" placeholder="新ID" style="width: 80px; background: rgba(0,0,0,0.2); border: 1px solid var(--border-light); color: white; border-radius: 4px; padding: 0.5rem;">
                             <button class="btn btn-primary" onclick="changeDeviceId('${data.uid}', '${port}')">変更して書き込み</button>
@@ -506,20 +525,20 @@ document.getElementById('btn-scan').addEventListener('click', async () => {
             `;
         } else {
             resultDiv.innerHTML = `
-                <div style="color: #ef4444; margin-bottom: 0.5rem; font-size: 0.9rem;">
+                <div style="color: #b00020; margin-bottom: 0.5rem; font-size: 0.9rem;">
                     ⚠️ 新規ロボットのUIDを検出できませんでした。（既に稼働中の機体は無言になるためここでは検出されません）
                 </div>
                 <div style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.8rem;">
                     もしこのポートに繋がっているのが登録済みの機体であれば、下のリストの各カードから書き込んでください。<br>
                     ※それでもここで強制的に上書きしたい場合は以下のボタンを押してください。
                 </div>
-                <button class="btn" style="background: transparent; border: 1px solid #ef4444; color: #ef4444; width: 100%;" onclick="startUpload('usb', '${port}')">
+                <button class="btn" style="background: transparent; border: 1px solid #b00020; color: #b00020; width: 100%;" onclick="startUpload('usb', '${port}')">
                     強制的に上書き書き込みを実行 (非推奨)
                 </button>
             `;
         }
     } catch (err) {
-        resultDiv.innerHTML = `<p style="color: #ef4444; font-size: 0.85rem;">エラー: ${err}</p>`;
+        resultDiv.innerHTML = `<p style="color: #b00020; font-size: 0.85rem;">エラー: ${err}</p>`;
     } finally {
         btn.innerHTML = 'ポートをスキャン';
         btn.disabled = false;
@@ -648,14 +667,15 @@ function appendFleetTerminalLine(text, color = '#a5b4fc') {
 
 // Upload Firmware (WebSocket)
 let ws = null;
-function startUpload(target, value) {
+async function startUpload(target, value) {
+    await refreshFirmwareUploadProfile();
     const terminal = document.getElementById('terminal');
     terminal.innerHTML = '';
     
     function logToTerminal(msg) {
         const line = document.createElement('div');
         line.className = 'terminal-line';
-        line.style.color = '#f59e0b'; // Amber for debug
+        line.style.color = '#806000'; // Amber for debug
         line.textContent = '[DEBUG] ' + msg;
         terminal.appendChild(line);
         terminal.scrollTop = terminal.scrollHeight;
@@ -678,9 +698,9 @@ function startUpload(target, value) {
         progressBar.style.width = '0%';
         progressBar.style.background = 'var(--accent-blue)'; // Reset color to blue
         progressText.innerText = 'Initializing...';
-        progressText.style.color = '#fff';
+        progressText.style.color = '#1a1a1c';
         progressPercent.innerText = '0%';
-        progressPercent.style.color = '#fff';
+        progressPercent.style.color = '#1a1a1c';
         logToTerminal('Progress UI reset');
     }
     
@@ -698,7 +718,15 @@ function startUpload(target, value) {
         logToTerminal('WebSocket connected! Sending data...');
         const fwSelect = document.getElementById('firmware-select');
         const firmware = fwSelect ? fwSelect.value : 'pico_robot';
-        ws.send(JSON.stringify({ target, value, firmware, ...getWifiPayload() }));
+        const payload = { target, value, firmware, ...getWifiPayload() };
+        if (target === 'ota' || target === 'ota_batch') {
+            payload.pio_env = firmwareUploadProfile.pio_ota_env || 'ota';
+            logToTerminal('pio_env=' + payload.pio_env);
+        } else if (target === 'usb') {
+            payload.pio_usb_env = firmwareUploadProfile.pio_usb_env || 'pico_w';
+            logToTerminal('pio_usb_env=' + payload.pio_usb_env);
+        }
+        ws.send(JSON.stringify(payload));
         logToTerminal('Data sent.');
     };
     
@@ -728,17 +756,17 @@ function startUpload(target, value) {
             }
             
             if (text.includes('SUCCESS') || text.includes('成功')) {
-                progressBar.style.background = '#10b981'; // Green
+                progressBar.style.background = '#006e54'; // Green
                 progressText.innerText = 'Success!';
-                progressText.style.color = '#10b981';
+                progressText.style.color = '#006e54';
                 progressBar.style.width = '100%';
                 progressPercent.innerText = '100%';
-                progressPercent.style.color = '#10b981';
+                progressPercent.style.color = '#006e54';
             } else if (text.includes('ERROR') || text.includes('FAILED')) {
-                progressBar.style.background = '#ef4444'; // Red
+                progressBar.style.background = '#b00020'; // Red
                 progressText.innerText = 'Error!';
-                progressText.style.color = '#ef4444';
-                progressPercent.style.color = '#ef4444';
+                progressText.style.color = '#b00020';
+                progressPercent.style.color = '#b00020';
             }
         }
 
@@ -750,7 +778,7 @@ function startUpload(target, value) {
         logToTerminal('WebSocket closed with code: ' + event.code + ', reason: ' + event.reason);
         const line = document.createElement('div');
         line.className = 'terminal-line';
-        line.style.color = '#8b92a5';
+        line.style.color = '#626264';
         line.textContent = '--- 通信終了 ---';
         terminal.appendChild(line);
         terminal.scrollTop = terminal.scrollHeight;
@@ -781,7 +809,7 @@ async function sendGlobalCommand(cmd) {
         const data = await res.json();
         appendFleetTerminalLine(
             `[CMD] ${cmd} OK — online=${data.unicast_targets} seq=${data.sequence?.status || 'n/a'}`,
-            '#34d399'
+            '#006e54'
         );
         const seq = data.sequence;
         if (cmd === 'STOP' && seq?.status === 'waiting_for_logs') {
@@ -803,7 +831,7 @@ async function sendGlobalCommand(cmd) {
 function setExperimentConfigStatus(text, kind = 'muted') {
     const el = document.getElementById('experiment-config-status');
     if (!el) return;
-    const colors = { ok: '#34d399', warn: '#fbbf24', err: '#f87171', muted: '#94a3b8', busy: '#60a5fa' };
+    const colors = { ok: '#006e54', warn: '#806000', err: '#b00020', muted: '#626264', busy: '#0017c1' };
     el.textContent = text;
     el.style.color = colors[kind] || colors.muted;
 }
@@ -930,15 +958,45 @@ function schedulePhaseSequencePoll() {
     }, phaseSequencePollIntervalMs());
 }
 
+function renderSequenceParameterView(container, data) {
+    const view = data.parameter_view;
+    const signature = JSON.stringify([view, data.parameter_readback]);
+    if (container.dataset.signature === signature) return;
+    container.dataset.signature = signature;
+    container.replaceChildren();
+    const status = document.createElement('p');
+    status.className = 'fm-parameter-readback';
+    status.textContent = data.parameter_readback?.label || '読戻し待ち';
+    status.dataset.state = data.parameter_readback?.state || 'unknown';
+    if (data.parameter_readback?.detail) status.title = data.parameter_readback.detail;
+    container.append(status);
+    if (!view) return;
+    const table = document.createElement('table'); table.className = 'fm-parameter-table';
+    const head = table.createTHead().insertRow();
+    for (const text of ['項目', '設定', ...view.agents.map(a => a.label)]) {
+        const th = document.createElement('th'); th.scope='col'; th.textContent=text; head.append(th);
+    }
+    const body = table.createTBody();
+    for (const item of view.rows) {
+        const row = body.insertRow(); const th=document.createElement('th'); th.scope='row'; th.textContent=item.label; row.append(th);
+        row.insertCell().textContent=item.expected;
+        for (const actual of item.actual) {
+            const cell=row.insertCell(); cell.dataset.state=actual.state;
+            const mark={match:'✓ ', mismatch:'≠ ', unknown:'— '}[actual.state] || '';
+            cell.textContent=actual.value === '—' ? '未確認' : mark+actual.value;
+        }
+    }
+    const wrap=document.createElement('div'); wrap.className='fm-parameter-table-wrap';wrap.append(table);container.append(wrap);
+    const timing=document.createElement('p');timing.className='fm-parameter-timing';
+    timing.textContent=`${view.timing.trials}条件 · ${view.timing.duration_s}秒 / 試行 · FB開始${view.timing.feedback_s}秒 · 保存${view.timing.save_hz} Hz`;
+    container.append(timing);
+}
+
 function updatePhaseSequencePanelCopy(data) {
     const titleEl = document.getElementById('phase-sequence-title');
     const descEl = document.getElementById('phase-sequence-description');
-    if (titleEl && data.ui_title && titleEl.textContent !== data.ui_title) {
-        titleEl.textContent = data.ui_title;
-    }
-    if (descEl && data.ui_description && descEl.textContent !== data.ui_description) {
-        descEl.textContent = data.ui_description;
-    }
+    if (titleEl) titleEl.textContent = 'パラメータ・実機確認';
+    if (descEl) renderSequenceParameterView(descEl, data);
     if (data.ui_confirm_hint) {
         phaseSequenceConfirmHint = data.ui_confirm_hint;
     }
@@ -948,7 +1006,7 @@ function updatePhaseSequencePanelCopy(data) {
 }
 
 function formatPhaseSequencePairLabel() {
-    return `ID ${phaseSequenceReferenceId}(偶・基準) / ${phaseSequencePartnerId}(奇)`;
+    return `機体1 / 機体2`;
 }
 
 function phaseSequenceStateLabel(status, totalTrials = 6) {
@@ -1013,7 +1071,7 @@ async function loadPhaseSequenceStatus() {
         if (stateEl.textContent !== stateLabel) {
             stateEl.textContent = stateLabel;
         }
-        const stateColor = status === 'error' ? '#ef4444' : (phaseSequenceBlockStartStates.has(status) ? '#f59e0b' : '#94a3b8');
+        const stateColor = status === 'error' ? '#b00020' : (phaseSequenceBlockStartStates.has(status) ? '#806000' : '#626264');
         if (stateEl.style.color !== stateColor) {
             stateEl.style.color = stateColor;
         }
@@ -1066,7 +1124,9 @@ async function loadPhaseSequenceStatus() {
             const totalPreStart = firstDelay + centeredPause;
             detailText =
                 `${stage}｜最初の動作まで ${formatSequenceDuration(remaining)}（全体 ${formatSequenceDuration(totalPreStart)}）｜${ackText}｜両機サーボが一度動けばOK`;
-        } else if (data.current_trial) {
+        } else if (status === 'stopped' && data.error) {
+            detailText = `停止済み｜${data.error}｜${data.message || ''}`;
+        } else if (data.current_trial && phaseSequenceActiveStates.has(status)) {
             const condition = data.condition || '';
             if (phaseSequenceType === 'delta_omega_sweep') {
                 detailText = `trial ${data.current_trial}/${totalTrials}｜${condition}｜Δωスイープ｜${data.message || ''}`;
@@ -1076,24 +1136,14 @@ async function loadPhaseSequenceStatus() {
                 detailText = `trial ${data.current_trial}/${totalTrials}｜${condition}｜Δφ=${phaseText}｜${data.message || ''}`;
             }
         } else {
-            const kappaNote =
-                Number.isFinite(Number(data.expected_kappa))
-                    ? `｜シーケンス κ=${Number(data.expected_kappa).toFixed(2)}`
-                    : '';
-            const kappaWarn =
-                data.kappa_yaml_aligned === false
-                    ? '｜⚠ sync_experiment_params.yaml の κ がシーケンスと不一致'
-                    : '';
-            detailText =
-                data.message || `設定済み：${formatPhaseSequencePairLabel()}｜${totalTrials}条件`;
-            detailText += kappaNote + kappaWarn;
+            detailText = data.kappa_yaml_aligned === false ? 'κの設定不一致' : '';
         }
-        if (detailText && detailEl.textContent !== detailText) {
+        if (detailEl.textContent !== detailText) {
             detailEl.textContent = detailText;
         }
     } catch (err) {
         stateEl.textContent = '接続待ち';
-        stateEl.style.color = '#94a3b8';
+        stateEl.style.color = '#626264';
         detailEl.textContent = 'シーケンス状態を取得できません';
         if (startBtn) startBtn.disabled = true;
         if (stopBtn) stopBtn.disabled = true;
@@ -1140,10 +1190,10 @@ let telemetryWs = null;
 const maxDataPoints = 100;
 
 const chartConfigs = {
-    Angle: { id: 'chartAngle', color: '#3b82f6', min: 0, max: 180 },
-    Flex: { id: 'chartFlex', color: '#10b981', min: 500, max: 900 },
-    Light: { id: 'chartLight', color: '#f59e0b', min: 0, max: 4095 },
-    Current: { id: 'chartCurrent', color: '#ef4444', min: 0, max: 4095 },
+    Angle: { id: 'chartAngle', color: '#0017c1', min: 0, max: 180 },
+    Flex: { id: 'chartFlex', color: '#006e54', min: 500, max: 900 },
+    Light: { id: 'chartLight', color: '#806000', min: 0, max: 4095 },
+    Current: { id: 'chartCurrent', color: '#b00020', min: 0, max: 4095 },
     Power: { id: 'chartPower', color: '#8b5cf6', min: 0, max: 50000 },
     Voltage: { id: 'chartVoltage', color: '#ec4899', min: 0, max: 10 }
 };
@@ -1209,13 +1259,13 @@ function initCharts() {
                     y: { 
                         min: config.min, 
                         max: config.max,
-                        grid: { color: 'rgba(255,255,255,0.1)' },
-                        ticks: { color: '#8b92a5' }
+                        grid: { color: window.fleetThemeColors?.().grid || '#d9d9db' },
+                        ticks: { color: window.fleetThemeColors?.().muted || '#626264' }
                     }
                 },
                 plugins: {
                     legend: {
-                        labels: { color: '#fff' }
+                        labels: { color: window.fleetThemeColors?.().text || '#1a1a1c' }
                     }
                 }
             }
@@ -1351,12 +1401,12 @@ async function loadRecords() {
             
             const tr = document.createElement('tr');
             tr.innerHTML = `
-                <td style="padding: 0.75rem; border-bottom: 1px solid rgba(255,255,255,0.05); color: #8b92a5;">${record.timestamp}</td>
-                <td style="padding: 0.75rem; border-bottom: 1px solid rgba(255,255,255,0.05);"><span class="badge" style="background: rgba(59,130,246,0.2); color: #60a5fa; font-size: 1.1rem; padding: 4px 8px;">#${record.robot_id}</span></td>
+                <td style="padding: 0.75rem; border-bottom: 1px solid rgba(255,255,255,0.05); color: #626264;">${record.timestamp}</td>
+                <td style="padding: 0.75rem; border-bottom: 1px solid rgba(255,255,255,0.05);"><span class="badge" style="background: rgba(59,130,246,0.2); color: #0017c1; font-size: 1.1rem; padding: 4px 8px;">#${record.robot_id}</span></td>
                 <td style="padding: 0.75rem; border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 1.1rem;">${record.memo}</td>
                 <td style="padding: 0.75rem; border-bottom: 1px solid rgba(255,255,255,0.05); text-align: right; white-space: nowrap;">
-                    <button class="btn" style="background: transparent; border: 1px solid #3b82f6; color: #3b82f6; padding: 0.3rem 0.6rem; font-size: 0.8rem; margin-right: 0.5rem;" onclick="editRecord('${record.timestamp}', '${record.robot_id}', '${record.memo.replace(/'/g, "\\'")}')">編集</button>
-                    <button class="btn" style="background: transparent; border: 1px solid #ef4444; color: #ef4444; padding: 0.3rem 0.6rem; font-size: 0.8rem;" onclick="deleteRecord('${record.timestamp}', '${record.robot_id}')">削除</button>
+                    <button class="btn" style="background: transparent; border: 1px solid #0017c1; color: #0017c1; padding: 0.3rem 0.6rem; font-size: 0.8rem; margin-right: 0.5rem;" onclick="editRecord('${record.timestamp}', '${record.robot_id}', '${record.memo.replace(/'/g, "\\'")}')">編集</button>
+                    <button class="btn" style="background: transparent; border: 1px solid #b00020; color: #b00020; padding: 0.3rem 0.6rem; font-size: 0.8rem;" onclick="deleteRecord('${record.timestamp}', '${record.robot_id}')">削除</button>
                 </td>
             `;
             tbody.appendChild(tr);
@@ -1465,3 +1515,15 @@ async function deleteRecord(timestamp, robotId) {
         console.error("Failed to delete record", e);
     }
 }
+
+// Theme changes update chart styling without changing data, scales, or experiments.
+document.addEventListener('fleet-theme-change', () => {
+    const colors = window.fleetThemeColors?.();
+    if (!colors) return;
+    for (const chart of Object.values(charts)) {
+        chart.options.scales.y.grid.color = colors.grid;
+        chart.options.scales.y.ticks.color = colors.muted;
+        chart.options.plugins.legend.labels.color = colors.text;
+        chart.update('none');
+    }
+});

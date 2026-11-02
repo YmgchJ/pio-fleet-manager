@@ -1,6 +1,16 @@
+# Local state (never share credentials, logs, calibration backups or robot notes)
+data/
+local/
+.env
+.env.*
+!.env.example
+wifi_config.local.h
+# Python / editor / OS artifacts
 __pycache__/
-*.pyc
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
 .DS_Store
-data/wifi_config.json
-data/experiments/
-data/merged_chunks/

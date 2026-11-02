@@ -14,6 +14,23 @@
   --border-active: rgba(255, 255, 255, 0.2);
 }
 
+.paddle-presets { display: grid; gap: 0.65rem; margin: 1rem 0; }
+.paddle-presets > div { display: flex; flex-wrap: wrap; align-items: center; gap: 0.6rem; }
+.paddle-presets strong { min-width: 4rem; }
+.paddle-presets button.paddle-selected { background: #075985; border-color: #38bdf8; color: #fff; }
+.paddle-presets button:disabled { opacity: 0.55; cursor: wait; }
+
+@media (max-width: 700px) {
+  header { position: static !important; }
+  header, body > div[style*="padding"] { padding-left: 1rem !important; padding-right: 1rem !important; }
+  .container { padding: 1rem !important; }
+  #tab-monitor > div[style*="grid-template-columns"] { grid-template-columns: 1fr !important; }
+  #tab-monitor .glass-panel { min-width: 0; padding: 1rem; }
+  #phase-sequence-panel h2 { flex-wrap: wrap; gap: 0.5rem; }
+  .paddle-presets > div { gap: 0.4rem; }
+  #btn-global-start:disabled { opacity: 0.6; cursor: default; }
+}
+
 * {
   box-sizing: border-box;
   margin: 0;
@@ -260,3 +277,9 @@ h2 {
   display: flex;
   gap: 0.5rem;
 }
+
+/* Initial-phase preset controls wrap on narrow screens and with long timestamps. */
+.convergence-preset-row { display:flex; flex-wrap:wrap; gap:.45rem; align-items:center; }
+.convergence-preset-row .btn { white-space:normal; }
+.convergence-calibration-select { flex:1 1 18rem; min-width:0; max-width:100%; padding:.55rem; border:1px solid var(--border-color, #475569); border-radius:.4rem; background:var(--bg-dark, #1e293b); color:var(--text-main, #f1f5f9); }
+.convergence-calibration-error { color:#fbbf24; overflow-wrap:anywhere; }

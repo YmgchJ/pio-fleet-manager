@@ -34,6 +34,78 @@ SEQUENCE_LOG_HZ_DEFAULT = 50.0
 SEQUENCE_CONTROL_LOOP_HZ = 500.0
 ALLOWED_SEQUENCE_LOG_HZ = (50.0, 25.0)
 LOG_BUFFER_RECORD_CAPACITY = 21000
+FLEX_HW_LOCK_PLAN_ID = "flex_hw_lock_v1"
+FLEX_HW_KAPPA1_PLAN_ID = "flex_hw_kappa1_7point_v1"
+FLEX_HW_KAPPA1_INTERLEAVED_PLAN_ID = "flex_hw_kappa1_interleaved_6point_v1"
+CURRENT_ZOPT_LOCK_PLAN_ID = "current_zopt_lock_v1"
+CURRENT_ZOPT_13POINT_PLAN_ID = "current_zopt_lock_13point_v2"
+CURRENT_OFFSET_CAL_ID = "current_offset_calibration_v1"
+CURRENT_OFFSET_LOCK_ID = "current_offset_lock_13point_v1"
+CURRENT_CYCLE_CAL_ID = "current_cycle2_calibration_v1"
+CURRENT_CYCLE_LOCK_ID = "current_cycle2_lock_13point_v1"
+CURRENT_CYCLE_PLAN_IDS = (CURRENT_CYCLE_CAL_ID, CURRENT_CYCLE_LOCK_ID)
+CURRENT_CONVERGENCE_CAL_ID = "current_convergence_calibration_v1"
+CURRENT_CONVERGENCE_LOCK_ID = "current_convergence_60mm_v1"
+CURRENT_CONVERGENCE_PLAN_IDS = (CURRENT_CONVERGENCE_CAL_ID, CURRENT_CONVERGENCE_LOCK_ID)
+CURRENT_FIXED_PLAN_IDS = (*CURRENT_CONVERGENCE_PLAN_IDS, CURRENT_ZOPT_13POINT_PLAN_ID, CURRENT_OFFSET_CAL_ID, CURRENT_OFFSET_LOCK_ID, *CURRENT_CYCLE_PLAN_IDS)
+CURRENT_13POINT_LOCK_IDS = (CURRENT_ZOPT_13POINT_PLAN_ID, CURRENT_OFFSET_LOCK_ID, CURRENT_CYCLE_LOCK_ID)
+# Must match firmware SYNC_UDP_COMMAND_MAX_LEN (1024 after OTA). Pre-OTA robots use 512.
+ROBOT_UDP_COMMAND_MAX_BYTES_LEGACY = 512
+ROBOT_UDP_COMMAND_MAX_BYTES = 1024
+
+
+def _is_flex_hw_lock(research: dict[str, Any] | None) -> bool:
+    return bool(research) and str(research.get("id")) == FLEX_HW_LOCK_PLAN_ID
+
+
+def _is_flex_hw_kappa1(research: dict[str, Any] | None) -> bool:
+    return bool(research) and str(research.get("id")) == FLEX_HW_KAPPA1_PLAN_ID
+
+
+def _is_flex_hw_kappa1_interleaved(research: dict[str, Any] | None) -> bool:
+    return bool(research) and str(research.get("id")) == FLEX_HW_KAPPA1_INTERLEAVED_PLAN_ID
+
+
+def _uses_flex_feedback(research: dict[str, Any] | None) -> bool:
+    return (
+        _is_flex_hw_lock(research)
+        or _is_flex_hw_kappa1(research)
+        or _is_flex_hw_kappa1_interleaved(research)
+    )
+
+
+def _is_current_zopt_lock(research: dict[str, Any] | None) -> bool:
+    return bool(research) and str(research.get("id")) in (CURRENT_ZOPT_LOCK_PLAN_ID,CURRENT_ZOPT_13POINT_PLAN_ID)
+
+
+def _arm_scalar(value: float) -> str:
+    if not math.isfinite(value):
+        raise SequenceValidationError("non-finite value in SEQ_ARM payload")
+    if abs(value - round(value)) < 1e-9:
+        return str(int(round(value)))
+    text = f"{value:.6f}".rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def _arm_omega_scalar(value: float) -> str:
+    if not math.isfinite(value) or value <= 0.0:
+        raise SequenceValidationError("invalid omega in SEQ_ARM payload")
+    return f"{value:.5f}".rstrip("0").rstrip(".")
+
+
+def _arm_phase_diff_for_firmware(phase_difference: float, plan: dict[str, Any]) -> float:
+    """pico_robot rejects SEQ_ARM when phase_diff < 0; absolute offsets use phase_offsets."""
+    value = float(phase_difference)
+    if plan.get("trial_phase_offsets_rad"):
+        value = math.fmod(value, 2.0 * math.pi)
+        if value < 0.0:
+            value += 2.0 * math.pi
+        return value
+    if value < 0.0 or value > 2.0 * math.pi + 1e-5:
+        raise SequenceValidationError(
+            f"phase_diff={value} is outside [0, 2π] (use trial_phase_offsets_rad for signed layout)"
+        )
+    return value
 
 
 def _sequence_log_hz_and_save_interval(config: dict[str, Any]) -> tuple[float, int]:
@@ -112,6 +184,8 @@ def _sequence_ui_copy(
         "zopt": "z_opt（逆設計）",
         "zsin": "z_sin（最適正弦）",
     }.get(z_mode, "cos(ψ)")
+    if config.get("research_plan", {}).get("preset_id") in ("80mm_E1", "80mm_E2", "80mm_E3", "40mm_E2", "40mm_E3", "40mm_F1"):
+        z_label = "cos(ψ+92°)（一次フーリエ、振幅1）"
     labels = config.get(
         "delta_omega_labels" if sequence_type == "delta_omega_sweep" else "phase_labels",
         [],
@@ -123,6 +197,7 @@ def _sequence_ui_copy(
     first_delay_s = float(config.get("first_start_delay_ms", 20000)) / 1000.0
     kappa = float(config.get("kappa", 5.0))
     open_loop = str(config.get("experiment_mode", "")).lower() == "open_loop_identification"
+    flex_hw = _uses_flex_feedback(config.get("research_plan"))
     autonomous_s = first_delay_s + total_trials * (pause_s + duration_s)
     pair_text = (
         f"ID {reference_agent}（基準）と ID {partner_agent}（パートナー）のペア。"
@@ -138,11 +213,16 @@ def _sequence_ui_copy(
         timing_text = (
             f"開始予約後{first_delay_s:.0f} sは水中投入・姿勢確認、その後{pause_s:.0f} sは中央停止、"
             f"各条件は{duration_s:.0f} s（0–{feedback_start_s:.0f} s: κ=0、"
-            f"{feedback_start_s:.0f}–{duration_s:.0f} s: 電流フィードバック κ={kappa:g}）。"
+            f"{feedback_start_s:.0f}–{duration_s:.0f} s: "
+            f"{'曲げ' if flex_hw else '電流'}フィードバック κ={kappa:g}）。"
             f"最初の動作までは{first_delay_s + pause_s:.0f} s、全{total_trials}条件は約{_format_duration_jp(autonomous_s)}です。"
         )
     common_tail = (
-        "曲げセンサは使用せず、current-only ファームウェアであることを開始前に検査します。"
+        (
+            "曲げフィードバック（SYNC_CURRENT_ONLY=0 ビルド）と src=flex を開始前に検査します。"
+            if flex_hw
+            else "曲げセンサは使用せず、current-only ファームウェアであることを開始前に検査します。"
+        )
         + ("" if open_loop else f" Z(ψ)={z_label}。")
     )
     if sequence_type == "delta_omega_sweep":
@@ -170,7 +250,11 @@ def _sequence_ui_copy(
             "ui_title": (
                 open_loop_title
                 if open_loop
-                else f"自動実験：{paddle_label}・電流同期・Δω両側スイープ{total_trials}条件"
+                else (
+                    f"自動実験：{paddle_label}・曲げ同期・Δω両側スイープ{total_trials}条件"
+                    if flex_hw
+                    else f"自動実験：{paddle_label}・電流同期・Δω両側スイープ{total_trials}条件"
+                )
             ),
             "ui_description": (
                 f"{pair_text} {timing_text}"
@@ -265,10 +349,17 @@ class ExperimentSequenceController:
     def get_status(self) -> dict[str, Any]:
         # Ensure the HTTP response is always JSON-serializable.
         status = json.loads(json.dumps(self._state, ensure_ascii=False, default=str))
+        preserved_message = status.get("message")
+        preserved_error = status.get("error")
         try:
             status.update(self._config_preview())
         except SequenceValidationError:
             pass
+        if status.get("status") != "idle":
+            if preserved_message:
+                status["message"] = preserved_message
+            if preserved_error:
+                status["error"] = preserved_error
         return status
 
     def _read_sequence_config(self) -> dict[str, Any]:
@@ -319,7 +410,7 @@ class ExperimentSequenceController:
             "total_trials": condition_count,
             "phase_reference_agent": reference_agent,
             "phase_partner_agent": partner_agent,
-            "phase_difference_definition": _phase_difference_definition(
+            "phase_difference_definition": config.get("phase_difference_definition") or _phase_difference_definition(
                 reference_agent, partner_agent
             ),
             "message": message,
@@ -444,7 +535,26 @@ class ExperimentSequenceController:
             raise SequenceValidationError("first_start_delay_ms is outside the safe range")
         if inter_trial_pause_ms < 0 or inter_trial_pause_ms > 3600000:
             raise SequenceValidationError("inter_trial_pause_ms is outside the safe range")
-        expected_kappa = 0.0 if open_loop else 5.0
+        research = config.get("research_plan", {})
+        flex_hw = _uses_flex_feedback(research)
+        flex_kappa1 = _is_flex_hw_kappa1(research)
+        flex_kappa1_interleaved = _is_flex_hw_kappa1_interleaved(research)
+        weak_feedback = (not open_loop and research.get("id") == "paddle_sync_minimal_v1"
+                         and research.get("preset_id") in ("80mm_E2", "80mm_E3", "40mm_E2", "40mm_E3", "40mm_F1")
+                         and (research.get("role") == "exploratory" or
+                              (research.get("preset_id") == "40mm_F1" and research.get("role") == "diagnostic")))
+        diagnostic = bool(config.get("diagnostic", False))
+        if research.get("preset_id") == "40mm_F1" and not diagnostic:
+            raise SequenceValidationError("F1にはdiagnostic:trueが必要です")
+        if diagnostic and (research.get("preset_id") != "40mm_F1" or expected_records > 1100 or len(phases) != 1 or save_interval != 10):
+            raise SequenceValidationError("PDG1診断は40mm F1・1条件・1100件以下に限定します")
+        expected_kappa = (
+            0.0
+            if open_loop
+            else 1.0
+            if research.get("id") == CURRENT_CONVERGENCE_LOCK_ID or weak_feedback or flex_kappa1 or flex_kappa1_interleaved or research.get("id") in CURRENT_13POINT_LOCK_IDS or research.get("id") in ("dual60_pilot_v1", "dual60_recovery_blocks_v1")
+            else 5.0
+        )
         if not math.isfinite(kappa) or abs(kappa - expected_kappa) > 1e-6:
             raise SequenceValidationError(
                 f"{experiment_mode} の κ は {expected_kappa:.1f} に固定してください"
@@ -452,16 +562,218 @@ class ExperimentSequenceController:
         if upload_strategy != "batch_on_stop":
             raise SequenceValidationError("upload_strategy は batch_on_stop のみ対応しています")
 
+        if (
+            not open_loop
+            and sequence_type == "delta_omega_sweep"
+            and research.get("id") == "paddle_sync_minimal_v1"
+            and research.get("role") == "phase_lock"
+        ):
+            if abs(sequence_log_hz - 50.0) > 1e-6:
+                raise SequenceValidationError(
+                    "Δω ロック幅プリセットは sequence_log_hz=50 に固定してください（40/60/80 mm 共通）"
+                )
+            if inter_trial_pause_ms != 20000 or first_delay_ms != 20000:
+                raise SequenceValidationError(
+                    "Δω ロック幅プリセットは first/inter 試行休止 20 s に固定してください"
+                )
+            if duration_ms != 60000 or feedback_start_ms != 10000:
+                raise SequenceValidationError(
+                    "Δω ロック幅プリセットは trial 60 s・feedback_start 10 s に固定してください"
+                )
+            if abs(analysis_start_s - 10.0) > 1e-6 or abs(analysis_end_s - 50.0) > 1e-6:
+                raise SequenceValidationError(
+                    "Δω ロック幅プリセットは解析窓 10–50 s に固定してください"
+                )
+            if omega_base_rad_s is None or abs(omega_base_rad_s - 9.4247779608) > 1e-5:
+                raise SequenceValidationError(
+                    "Δω ロック幅プリセットは omega_base_rad_s=3π (9.424778) に固定してください"
+                )
+        elif (
+            not open_loop
+            and sequence_type == "delta_omega_sweep"
+            and _is_flex_hw_lock(research)
+            and research.get("role") == "phase_lock"
+        ):
+            if len(labels) != 13:
+                raise SequenceValidationError("flex HW lock は Δω 13 条件に固定してください")
+            if abs(sequence_log_hz - 25.0) > 1e-6:
+                raise SequenceValidationError(
+                    "flex HW lock は sequence_log_hz=25 に固定してください（13×60×25=19500 件）"
+                )
+            if inter_trial_pause_ms != 20000 or first_delay_ms != 20000:
+                raise SequenceValidationError(
+                    "flex HW lock は first/inter 試行休止 20 s に固定してください"
+                )
+            if duration_ms != 60000 or feedback_start_ms != 10000:
+                raise SequenceValidationError(
+                    "flex HW lock は trial 60 s・feedback_start 10 s に固定してください"
+                )
+            if abs(analysis_start_s - 10.0) > 1e-6 or abs(analysis_end_s - 50.0) > 1e-6:
+                raise SequenceValidationError(
+                    "flex HW lock は解析窓 10–50 s に固定してください"
+                )
+            if omega_base_rad_s is None or abs(omega_base_rad_s - 9.4247779608) > 1e-5:
+                raise SequenceValidationError(
+                    "flex HW lock は omega_base_rad_s=3π (9.424778) に固定してください"
+                )
+        elif (
+            not open_loop
+            and sequence_type == "delta_omega_sweep"
+            and flex_kappa1
+            and research.get("role") == "phase_lock"
+        ):
+            if len(labels) != 7:
+                raise SequenceValidationError(
+                    "flex κ=1 7点 lock は Δω 7 条件（rad/s、±0.30/0.10 刻み）に固定してください"
+                )
+            if abs(sequence_log_hz - 25.0) > 1e-6:
+                raise SequenceValidationError(
+                    "flex κ=1 7点 lock は sequence_log_hz=25（7×120×25=21000 件）に固定してください"
+                )
+            if inter_trial_pause_ms != 20000 or first_delay_ms != 20000:
+                raise SequenceValidationError(
+                    "flex κ=1 7点 lock は first/inter 試行休止 20 s に固定してください"
+                )
+            if duration_ms != 120000 or feedback_start_ms != 10000:
+                raise SequenceValidationError(
+                    "flex κ=1 7点 lock は trial 120 s・feedback_start 10 s に固定してください"
+                )
+            if abs(kappa - 1.0) > 1e-6:
+                raise SequenceValidationError("flex κ=1 7点 lock は κ=1.0 に固定してください")
+            if abs(analysis_start_s - 60.0) > 1e-6 or abs(analysis_end_s - 120.0) > 1e-6:
+                raise SequenceValidationError(
+                    "flex κ=1 7点 lock は解析窓 60–120 s に固定してください"
+                )
+            tpo = config.get("trial_phase_offsets_rad")
+            if not isinstance(tpo, dict) or len(tpo.get("12", [])) != 7 or len(tpo.get("13", [])) != 7:
+                raise SequenceValidationError(
+                    "flex κ=1 7点 lock は trial_phase_offsets_rad（ID12/13 各7）が必要です"
+                )
+            if omega_base_rad_s is None or abs(omega_base_rad_s - 9.4247779608) > 1e-5:
+                raise SequenceValidationError(
+                    "flex κ=1 7点 lock は omega_base_rad_s=3π (9.424778) に固定してください"
+                )
+            expected = math.ceil(len(deltas) * duration_ms / 1000.0 * sequence_log_hz)
+            if expected > LOG_BUFFER_RECORD_CAPACITY:
+                raise SequenceValidationError(
+                    f"flex κ=1 7点 lock は約 {expected} ログ件で容量 {LOG_BUFFER_RECORD_CAPACITY} を超えます"
+                )
+        elif (
+            not open_loop
+            and sequence_type == "delta_omega_sweep"
+            and flex_kappa1_interleaved
+            and research.get("role") == "phase_lock"
+        ):
+            if len(labels) != 6:
+                raise SequenceValidationError(
+                    "flex κ=1 追加点 6 Δω lock は 6 条件（rad/s、±0.25/0.05 刻み）に固定してください"
+                )
+            if abs(sequence_log_hz - 25.0) > 1e-6:
+                raise SequenceValidationError(
+                    "flex κ=1 追加点 lock は sequence_log_hz=25（6×120×25=18000 件）に固定してください"
+                )
+            if inter_trial_pause_ms != 20000 or first_delay_ms != 20000:
+                raise SequenceValidationError(
+                    "flex κ=1 追加点 lock は first/inter 試行休止 20 s に固定してください"
+                )
+            if duration_ms != 120000 or feedback_start_ms != 10000:
+                raise SequenceValidationError(
+                    "flex κ=1 追加点 lock は trial 120 s・feedback_start 10 s に固定してください"
+                )
+            if abs(kappa - 1.0) > 1e-6:
+                raise SequenceValidationError("flex κ=1 追加点 lock は κ=1.0 に固定してください")
+            if abs(analysis_start_s - 60.0) > 1e-6 or abs(analysis_end_s - 120.0) > 1e-6:
+                raise SequenceValidationError(
+                    "flex κ=1 追加点 lock は解析窓 60–120 s に固定してください"
+                )
+            tpo = config.get("trial_phase_offsets_rad")
+            if not isinstance(tpo, dict) or len(tpo.get("12", [])) != 6 or len(tpo.get("13", [])) != 6:
+                raise SequenceValidationError(
+                    "flex κ=1 追加点 lock は trial_phase_offsets_rad（ID12/13 各6）が必要です"
+                )
+            if omega_base_rad_s is None or abs(omega_base_rad_s - 9.4247779608) > 1e-5:
+                raise SequenceValidationError(
+                    "flex κ=1 追加点 lock は omega_base_rad_s=3π (9.424778) に固定してください"
+                )
+            expected = math.ceil(len(deltas) * duration_ms / 1000.0 * sequence_log_hz)
+            if expected > LOG_BUFFER_RECORD_CAPACITY:
+                raise SequenceValidationError(
+                    f"flex κ=1 追加点 lock は約 {expected} ログ件で容量 {LOG_BUFFER_RECORD_CAPACITY} を超えます"
+                )
+        elif (not open_loop and sequence_type == "delta_omega_sweep"
+              and research.get("id") in CURRENT_13POINT_LOCK_IDS):
+            batch = research.get("batch")
+            expected_grid = ([round(i * .1, 2) for i in range(-3, 4)] if batch == "base7"
+                             else [round(-.25 + i * .1, 2) for i in range(6)] if batch == "extra6" else [])
+            displayed = research.get("display_delta_omega_rad_s", [])
+            if (not expected_grid or len(deltas) != len(expected_grid)
+                    or len(displayed) != len(expected_grid)
+                    or any(abs(float(a)-b)>1e-9 for a,b in zip(displayed,expected_grid))
+                    or any(abs(a+b)>1e-9 for a,b in zip(deltas,expected_grid))):
+                raise SequenceValidationError("電流13点は7点＋追加6点、表示Δω=ω13−ω12に固定してください")
+            if (abs(sequence_log_hz-25)>1e-9 or duration_ms!=120000
+                    or feedback_start_ms!=10000 or abs(kappa-1)>1e-9
+                    or abs(analysis_start_s-60)>1e-9 or abs(analysis_end_s-120)>1e-9
+                    or omega_base_rad_s is None or abs(omega_base_rad_s-3*math.pi)>1e-6
+                    or agent_ids != [12,13]):
+                raise SequenceValidationError("電流13点はID12/13・κ1・120s・評価60–120s・保存25Hz・ω1=3πです")
+        elif (
+            not open_loop
+            and sequence_type == "delta_omega_sweep"
+            and _is_current_zopt_lock(research)
+        ):
+            if len(labels) != 7:
+                raise SequenceValidationError(
+                    "current Z_opt lock は Δω 7 条件（±0.30 rad/s, 0.10 刻み）に固定してください"
+                )
+            if abs(sequence_log_hz - 25.0) > 1e-6:
+                raise SequenceValidationError(
+                    "current Z_opt lock は sequence_log_hz=25 に固定してください（7×60×25=10500 件）"
+                )
+            if duration_ms != 60000 or feedback_start_ms != 10000:
+                raise SequenceValidationError(
+                    "current Z_opt lock は trial 60 s・feedback_start 10 s に固定してください"
+                )
+            if abs(analysis_start_s - 10.0) > 1e-6 or abs(analysis_end_s - 50.0) > 1e-6:
+                raise SequenceValidationError(
+                    "current Z_opt lock は解析窓 10–50 s に固定してください"
+                )
+            if omega_base_rad_s is None or abs(omega_base_rad_s - 9.4247779608) > 1e-5:
+                raise SequenceValidationError(
+                    "current Z_opt lock は omega_base_rad_s=3π (9.424778) に固定してください"
+                )
+
         sync_params = copy.deepcopy(
             effective_prc_params(load_sync_params(_sequence_parameter_path(config)))
         )
+        if research.get("id") in CURRENT_FIXED_PLAN_IDS:
+            if (sync_params.get("z_mode") != "zopt" or int(sync_params.get("prc_n", 0)) != 4
+                    or abs(float(sync_params.get("center",0))-110)>1e-9
+                    or abs(float(sync_params.get("amplitude",0))-75)>1e-9
+                    or abs(float(sync_params.get("feedback_tau",-1)))>1e-9):
+                raise SequenceValidationError("電流比較はZopt,1／Zopt,10のみ・PRC4次・中心110°・振幅75°・遅れ0に固定してください")
         sync_source = str(sync_params.get("feedback_source", "")).lower()
-        if not bool(config.get("current_only", False)):
-            raise SequenceValidationError("sequence config must set current_only: true")
-        if not bool(sync_params.get("current_only", False)) or sync_source != "current":
-            raise SequenceValidationError(
-                "sync_experiment_params.yaml が current-only/current になっていません"
-            )
+        if flex_hw:
+            if bool(config.get("current_only", True)):
+                raise SequenceValidationError("flex HW lock は current_only: false が必要です")
+            if str(config.get("feedback_source", "")).lower() != "flex":
+                raise SequenceValidationError("flex HW lock は feedback_source: flex が必要です")
+            if bool(sync_params.get("current_only", True)) or sync_source != "flex":
+                raise SequenceValidationError(
+                    "parameter_file が flex フィードバック（current_only: false）になっていません"
+                )
+        elif research.get("id") in ("dual60_precalibration_v1", "dual60_pilot_v1", "dual60_recovery_calibration_v1", "dual60_recovery_blocks_v1"):
+            if config.get("current_only") is not False or config.get("feedback_source") != "dual":
+                raise SequenceValidationError("併用条件は current_only:false / feedback_source:dual が必要です")
+            if not sync_params.get("current_only") or sync_source != "current":
+                raise SequenceValidationError("専用FWの起動パラメータ経路が不一致です")
+        else:
+            if not bool(config.get("current_only", False)):
+                raise SequenceValidationError("sequence config must set current_only: true")
+            if not bool(sync_params.get("current_only", False)) or sync_source != "current":
+                raise SequenceValidationError(
+                    "sync_experiment_params.yaml が current-only/current になっていません"
+                )
         if abs(float(sync_params.get("kappa", float("nan"))) - kappa) > 1e-6:
             raise SequenceValidationError("sequence config と sync parameter の κ が一致しません")
         omega_by_agent = sync_params.get("omega_by_agent", {})
@@ -500,7 +812,7 @@ class ExperimentSequenceController:
             "sequence_type": sequence_type,
             "agent_ids": agent_ids,
             "paddle": str(config.get("paddle", "big")),
-            "current_only": True,
+            "current_only": bool(config.get("current_only", not flex_hw)),
             "flex_sensor_present": True,
             "upload_strategy": upload_strategy,
             "one_session_per_sequence": True,
@@ -509,7 +821,7 @@ class ExperimentSequenceController:
             "trial_duration_ms": duration_ms,
             "feedback_start_ms": feedback_start_ms,
             "kappa": kappa,
-            "feedback_source": "current",
+            "feedback_source": str(config.get("feedback_source", "flex" if flex_hw else "current")),
             "phase_reference_agent": reference_agent,
             "phase_partner_agent": partner_agent,
             "phase_difference_definition": phase_difference_definition,
@@ -522,12 +834,52 @@ class ExperimentSequenceController:
             "save_interval": save_interval,
             "analysis_window_end_s": analysis_end_s,
             "analysis_window_start_s": analysis_start_s,
+            "diagnostic": diagnostic,
             "research_plan": copy.deepcopy(config.get("research_plan", {})),
         }
         if partner_omegas_rad is not None:
             plan["partner_omegas_rad"] = partner_omegas_rad
         if omega_base_rad_s is not None:
             plan["omega_base_rad_s"] = omega_base_rad_s
+        tpo_raw = config.get("trial_phase_offsets_rad")
+        if isinstance(tpo_raw, dict):
+            tpo = {str(k): [float(x) for x in v] for k, v in tpo_raw.items()}
+            plan["trial_phase_offsets_rad"] = tpo
+            ref_key = str(reference_agent)
+            par_key = str(partner_agent)
+            if ref_key in tpo and par_key in tpo and len(tpo[ref_key]) == len(labels):
+                sign = -1 if research.get("id") in CURRENT_FIXED_PLAN_IDS or research.get("id") in ("dual60_precalibration_v1", "dual60_pilot_v1", "dual60_recovery_calibration_v1", "dual60_recovery_blocks_v1") else 1
+                plan["phase_differences_rad"] = [
+                    sign * (tpo[ref_key][i] - tpo[par_key][i]) for i in range(len(labels))
+                ]
+        if research.get("id") in (CURRENT_OFFSET_CAL_ID, CURRENT_OFFSET_LOCK_ID):
+            from current_offset_plan import validate as validate_current_offset
+            try:
+                validate_current_offset(plan)
+            except (ValueError, KeyError, OSError, TypeError) as exc:
+                raise SequenceValidationError(str(exc)) from exc
+        if research.get("id") in CURRENT_CONVERGENCE_PLAN_IDS:
+            from current_convergence_plan import validate as validate_current_convergence
+            try:
+                validate_current_convergence(plan)
+            except (ValueError, KeyError, OSError, TypeError, IndexError) as exc:
+                raise SequenceValidationError(str(exc)) from exc
+        if research.get("id") in CURRENT_CYCLE_PLAN_IDS:
+            from current_cycle_plan import validate as validate_current_cycle
+            try:
+                validate_current_cycle(plan)
+            except (ValueError, KeyError, OSError, TypeError) as exc:
+                raise SequenceValidationError(str(exc)) from exc
+        if research.get("id") in ("dual60_precalibration_v1", "dual60_pilot_v1", "dual60_recovery_calibration_v1", "dual60_recovery_blocks_v1"):
+            if research.get("id") in ("dual60_recovery_calibration_v1", "dual60_recovery_blocks_v1"):
+                from dual_sensor_recovery_plan import validate as validate_dual
+            else:
+                from dual_sensor_plan import validate as validate_dual
+            try:
+                validate_dual(plan)
+            except (ValueError, KeyError, OSError, TypeError, IndexError) as exc:
+                raise SequenceValidationError(str(exc)) from exc
+        self._validate_arm_command_lengths(plan)
         return plan
 
     def _validate_targets(
@@ -540,6 +892,15 @@ class ExperimentSequenceController:
         validation_plan = plan or self._plan
         if validation_plan is None:
             raise SequenceValidationError("sequence plan is not loaded")
+        if validation_plan.get("research_plan", {}).get("id") in ("dual60_precalibration_v1", "dual60_pilot_v1", "dual60_recovery_calibration_v1", "dual60_recovery_blocks_v1"):
+            if validation_plan["research_plan"]["id"] in ("dual60_recovery_calibration_v1", "dual60_recovery_blocks_v1"):
+                from dual_sensor_recovery_plan import validate_targets
+            else:
+                from dual_sensor_plan import validate_targets
+            try:
+                return validate_targets(raw_targets, validation_plan)
+            except (ValueError, KeyError, TypeError) as exc:
+                raise SequenceValidationError(str(exc)) from exc
         omega_by_agent = validation_plan["sync_params_snapshot"].get("omega_by_agent", {})
         expected_z_mode = str(
             validation_plan["sync_params_snapshot"].get("z_mode", "cos")
@@ -558,11 +919,19 @@ class ExperimentSequenceController:
             if not item.get("ip"):
                 problems.append(f"ID {agent_id}: IPアドレスなし")
                 continue
+            if validation_plan.get("diagnostic"):
+                if _as_int(item.get("diag")) != 1 or not str(item.get("build", "")).startswith("pdg1-"):
+                    problems.append(f"ID {agent_id}: 診断FW未確認（書換えが必要）")
+                else:
+                    for key, expected in [("p_n", 1), ("p_a0", 0), ("p_a1", -0.0348994967), ("p_b1", -0.999390827), ("p_tau", 0)]:
+                        if item.get(key) is None or abs(float(item[key])-expected) > 2e-5:
+                            problems.append(f"ID {agent_id}: 実機係数 {key} 不一致/未確認")
             if _as_int(item.get("paused")) != 1:
                 problems.append(f"ID {agent_id}: 停止状態ではありません")
             if _as_int(item.get("params")) != 1:
                 problems.append(f"ID {agent_id}: パラメータ未取得")
-            if _as_int(item.get("src")) != 1:
+            flex_hw = _uses_flex_feedback(validation_plan.get("research_plan"))
+            if not flex_hw and _as_int(item.get("src")) != 1:
                 problems.append(f"ID {agent_id}: feedback source が current ではありません")
             observed_z_mode = _as_int(item.get("zmode"))
             if observed_z_mode != expected_z_mode_code:
@@ -570,13 +939,72 @@ class ExperimentSequenceController:
                     f"ID {agent_id}: zmode={item.get('zmode')} "
                     f"（設定 {expected_z_mode}={expected_z_mode_code} と不一致）"
                 )
-            if str(item.get("mode", "")) != "current_only":
-                problems.append(f"ID {agent_id}: current-only ファームウェアではありません")
-            if (validation_plan.get("research_plan", {}).get("id") == "paddle_sync_minimal_v1"
-                    and item.get("interaction_path") != "current_50hz_ma5_rolling_p10_p90"):
-                problems.append(f"ID {agent_id}: 電流前処理がMA5/rolling P10–P90ではないか、確認できません")
-            if _as_int(item.get("flex_used")) != 0:
-                problems.append(f"ID {agent_id}: flex_used が 0 ではありません")
+            if flex_hw:
+                if str(item.get("mode", "")) != "selectable":
+                    fw = str(item.get("fw", ""))
+                    hint = (
+                        "（FM の OTA は flex 条件選択中なら ota_flex_fb。手動: "
+                        "pio run -e ota_flex_fb -t upload）"
+                        if fw != "pico_robot_flex"
+                        else "（再起動後にパラメータ再取得）"
+                    )
+                    problems.append(
+                        f"ID {agent_id}: flex フィードバック用ファームウェア（mode=selectable）ではありません"
+                        f"{hint}"
+                    )
+                if _as_int(item.get("src")) != 0:
+                    problems.append(f"ID {agent_id}: feedback source が flex ではありません")
+                if _as_int(item.get("flex_used")) != 1:
+                    problems.append(f"ID {agent_id}: flex_used が 1 ではありません")
+            else:
+                if str(item.get("mode", "")) != "current_only":
+                    problems.append(f"ID {agent_id}: current-only ファームウェアではありません")
+                path = str(item.get("interaction_path", ""))
+                if ("rolling_p10_p90" in path or
+                        (validation_plan.get("research_plan", {}).get("id") == "paddle_sync_minimal_v1"
+                         and path != "current_50hz_ma5_fixed_affine")):
+                    problems.append(
+                        f"ID {agent_id}: 電流前処理に移動P10/P90は使用禁止です。"
+                        "MA5＋固定アフィン正規化（current_50hz_ma5_fixed_affine）を確認してください"
+                    )
+                if _as_int(item.get("flex_used")) != 0:
+                    problems.append(f"ID {agent_id}: flex_used が 0 ではありません")
+            if (validation_plan.get("research_plan") or {}).get("id") in CURRENT_FIXED_PLAN_IDS:
+                obs = validation_plan["sync_params_snapshot"].get("current_observer", {})
+                row = (obs.get("by_agent") or {}).get(str(agent_id), {})
+                expected_cycles = obs.get("phase_cycles", 1)
+                expected_path = ("current_50hz_ma5_cycle2_fixed_affine" if expected_cycles == 2
+                                 else "current_50hz_ma5_fixed_affine")
+                if (obs.get("mode") != "fixed_affine" or obs.get("clip") is not False
+                        or obs.get("ma_samples") != 5 or obs.get("sample_hz") != 50
+                        or item.get("interaction_path") != expected_path):
+                    problems.append(f"ID {agent_id}: MA5・50Hz・固定正規化（clipなし）が未確認です")
+                if (validation_plan.get("research_plan") or {}).get("id") in CURRENT_CYCLE_PLAN_IDS:
+                    if _as_int(item.get("cur_cycles")) != expected_cycles:
+                        problems.append(f"ID {agent_id}: 同位相平均 {expected_cycles} 周期の読戻しが未確認です")
+                elif item.get("cur_cycles") is not None and _as_int(item.get("cur_cycles")) != 1:
+                    problems.append(f"ID {agent_id}: 従来条件に周期平均が残っています")
+                actual_params = validation_plan["sync_params_snapshot"]
+                expected_readback = {"p_n": actual_params.get("prc_n"),
+                                     "p_tau": actual_params.get("feedback_tau"),
+                                     "s_center": actual_params.get("center"),
+                                     "s_amplitude": actual_params.get("amplitude")}
+                expected_readback["p_a0"] = actual_params.get("prc_a0", 0)
+                for n in range(1, 5):
+                    expected_readback[f"p_a{n}"] = actual_params.get(f"prc_a{n}", 0)
+                    expected_readback[f"p_b{n}"] = actual_params.get(f"prc_b{n}", 0)
+                for field, expected in expected_readback.items():
+                    value = item.get(field)
+                    if expected is None or value is None or not math.isfinite(float(value)) or abs(float(value)-float(expected))>2e-5:
+                        problems.append(f"ID {agent_id}: Z/制御設定 {field} が不一致/未確認です")
+                for field, key in (("cur_center","center_mA"),("cur_width","width_mA")):
+                    expected = row.get(key)
+                    value = item.get(field)
+                    if (expected is None or value is None
+                            or not math.isfinite(float(expected)) or not math.isfinite(float(value))
+                            or abs(float(value)-float(expected))>1e-3
+                            or (field == "cur_width" and float(value)<=0)):
+                        problems.append(f"ID {agent_id}: 固定尺度 {field} が不一致/未確認です")
             if item.get("kappa") is None:
                 problems.append(f"ID {agent_id}: κ を確認できません")
             else:
@@ -634,9 +1062,9 @@ class ExperimentSequenceController:
             "total_trials": len(self._plan["phase_differences_rad"]),
             "agent_ids": list(self._plan["agent_ids"]),
             "paddle": self._plan["paddle"],
-            "current_only": True,
+            "current_only": bool(self._plan.get("current_only", True)),
             "flex_sensor_present": True,
-            "feedback_source": "current",
+            "feedback_source": self._plan.get("feedback_source", "current"),
             "kappa": self._plan["kappa"],
             "kappa_init": float(self._plan["sync_params_snapshot"].get("kappa_init", 0.0)),
             "feedback_start_ms": self._plan["feedback_start_ms"],
@@ -666,6 +1094,8 @@ class ExperimentSequenceController:
         return context
 
     async def start(self, requested_agent_ids: list[int] | None = None) -> dict[str, Any]:
+        if self._task is not None and not self._task.done():
+            raise SequenceValidationError("前の実験の終了処理中です。少し待ってから開始してください")
         if self._state.get("status") in self.ACTIVE_STATES | {"awaiting_upload"}:
             raise SequenceValidationError("sequence is already running")
 
@@ -779,7 +1209,30 @@ class ExperimentSequenceController:
                 self._set_status("stopped", message="sequence task was cancelled")
         except Exception as exc:
             self._trial_failed = True
-            self._set_status("error", error=str(exc), message="シーケンスを中止しました")
+            error_text = str(exc)
+            if "ARMED timeout" in error_text and self._plan is not None:
+                try:
+                    sample = self.build_arm_command(
+                        str(self._state.get("sequence_id", "ps000000_000000")),
+                        1,
+                        str(self._plan["phase_labels"][0]),
+                        float(self._plan["phase_differences_rad"][0]),
+                        len(self._plan["phase_differences_rad"]),
+                        int(self._plan["agent_ids"][0]),
+                        self._plan,
+                    )
+                    arm_bytes = len(sample.encode("utf-8"))
+                    if arm_bytes > ROBOT_UDP_COMMAND_MAX_BYTES_LEGACY:
+                        error_text = (
+                            f"{error_text}（SEQ_ARM={arm_bytes}B > 旧FW UDP {ROBOT_UDP_COMMAND_MAX_BYTES_LEGACY}B。"
+                            "両機を OTA してから再試行してください）"
+                        )
+                except SequenceValidationError:
+                    pass
+            from log_receiver import fm_event
+
+            fm_event(f"[SEQ] 中止: {error_text}")
+            self._set_status("error", error=error_text, message="シーケンスを中止しました")
             self._send_to_targets("SEQ_ABORT")
         finally:
             if self._task is asyncio.current_task():
@@ -982,6 +1435,81 @@ class ExperimentSequenceController:
                 raise SequenceValidationError(f"{event_name} timeout; missing agents={missing}")
             await asyncio.sleep(min(0.05, remaining))
 
+    def build_arm_command(
+        self,
+        sequence_id: str,
+        trial: int,
+        condition: str,
+        phase_difference: float,
+        total_trials: int,
+        agent_id: int,
+        plan: dict[str, Any],
+    ) -> str:
+        reference_agent = int(plan["phase_reference_agent"])
+        phase_differences = [float(v) for v in plan["phase_differences_rad"]]
+        labels = [str(v) for v in plan["phase_labels"]]
+        tpo = plan.get("trial_phase_offsets_rad")
+        if tpo:
+            key = str(agent_id)
+            if key not in tpo:
+                raise SequenceValidationError(f"trial_phase_offsets_rad に agent {agent_id} がありません")
+            offsets = [float(v) for v in tpo[key]]
+        else:
+            offsets = [
+                0.0 if int(agent_id) == reference_agent else -phase_diff
+                for phase_diff in phase_differences
+            ]
+        phase_diff_arm = _arm_phase_diff_for_firmware(phase_difference, plan)
+        command = (
+            f"SEQ_ARM,seq:{sequence_id},trial:{trial},condition:{condition},"
+            f"phase_offset:{_arm_scalar(offsets[trial - 1])},phase_diff:{_arm_scalar(phase_diff_arm)},"
+            f"phase_offsets:{';'.join(_arm_scalar(v) for v in offsets)},"
+            f"conditions:{';'.join(labels)},"
+            f"feedback_start_ms:{plan['feedback_start_ms']},"
+            f"duration_ms:{plan['trial_duration_ms']},"
+            f"inter_trial_pause_ms:{plan['inter_trial_pause_ms']},"
+            f"kappa:{_arm_scalar(plan['kappa'])},"
+            f"total_trials:{total_trials},"
+            f"save_interval:{int(plan.get('save_interval', 10))}"
+        )
+        if plan.get("diagnostic"):
+            command += ",diagnostic:1"
+        partner_omegas = plan.get("partner_omegas_rad")
+        if partner_omegas:
+            command += (
+                f",partner_omegas:{';'.join(_arm_omega_scalar(float(v)) for v in partner_omegas)}"
+            )
+        if plan.get("research_plan", {}).get("id")=="dual60_recovery_blocks_v1":
+            command += ",recovery:"+plan["research_plan"]["recovery_order"]
+        return command
+
+    def _validate_arm_command_lengths(self, plan: dict[str, Any]) -> None:
+        sequence_id = "ps000000_000000"
+        trial = 1
+        condition = str(plan["phase_labels"][0])
+        phase_difference = float(plan["phase_differences_rad"][0])
+        total_trials = len(plan["phase_differences_rad"])
+        worst = 0
+        for agent_id in plan["agent_ids"]:
+            command = self.build_arm_command(
+                sequence_id,
+                trial,
+                condition,
+                phase_difference,
+                total_trials,
+                int(agent_id),
+                plan,
+            )
+            worst = max(worst, len(command.encode("utf-8")))
+        if worst > ROBOT_UDP_COMMAND_MAX_BYTES:
+            raise SequenceValidationError(
+                f"SEQ_ARM が {worst} バイトで上限 {ROBOT_UDP_COMMAND_MAX_BYTES} を超えます。"
+                "試行数を減らすかファームウェアを更新してください"
+            )
+        if worst > ROBOT_UDP_COMMAND_MAX_BYTES_LEGACY:
+            # Compacted payloads fit legacy 512-byte robots; longer plans need OTA.
+            pass
+
     def _send_arm_commands(
         self,
         sequence_id: str,
@@ -991,35 +1519,24 @@ class ExperimentSequenceController:
         total_trials: int,
     ) -> None:
         assert self._plan is not None
-        reference_agent = int(self._plan["phase_reference_agent"])
-        phase_differences = [float(v) for v in self._plan["phase_differences_rad"]]
-        labels = [str(v) for v in self._plan["phase_labels"]]
-        phase_offsets_by_agent: dict[int, list[float]] = {}
-        for agent_id in self._plan["agent_ids"]:
-            offsets = []
-            for phase_diff in phase_differences:
-                offsets.append(0.0 if int(agent_id) == reference_agent else -phase_diff)
-            phase_offsets_by_agent[int(agent_id)] = offsets
-
         for target in self._targets:
             agent_id = int(target["id"])
-            offsets = phase_offsets_by_agent[agent_id]
-            command = (
-                f"SEQ_ARM,seq:{sequence_id},trial:{trial},condition:{condition},"
-                f"phase_offset:{offsets[0]:.6f},phase_diff:{phase_difference:.6f},"
-                f"phase_offsets:{';'.join(f'{v:.6f}' for v in offsets)},"
-                f"conditions:{';'.join(labels)},"
-                f"feedback_start_ms:{self._plan['feedback_start_ms']},"
-                f"duration_ms:{self._plan['trial_duration_ms']},"
-                f"inter_trial_pause_ms:{self._plan['inter_trial_pause_ms']},"
-                f"kappa:{self._plan['kappa']:.6f},"
-                f"total_trials:{total_trials},"
-                f"save_interval:{int(self._plan.get('save_interval', 10))},"
-                "src:current,mode:current_only"
+            command = self.build_arm_command(
+                sequence_id,
+                trial,
+                condition,
+                phase_difference,
+                total_trials,
+                agent_id,
+                self._plan,
             )
-            partner_omegas = self._plan.get("partner_omegas_rad")
-            if partner_omegas:
-                command += f",partner_omegas:{';'.join(f'{v:.6f}' for v in partner_omegas)}"
+            encoded_len = len(command.encode("utf-8"))
+            if encoded_len > ROBOT_UDP_COMMAND_MAX_BYTES_LEGACY:
+                print(
+                    f"[SEQ] WARN: SEQ_ARM {encoded_len} B > legacy UDP {ROBOT_UDP_COMMAND_MAX_BYTES_LEGACY}; "
+                    "OTA firmware with 1024-byte commands required",
+                    flush=True,
+                )
             self._send_one(target, command)
 
     def _send_one(self, target: dict[str, Any], command: str) -> bool:
@@ -1182,10 +1699,10 @@ class ExperimentSequenceController:
             )
             if self._plan:
                 expected = set(self._plan["agent_ids"])
-                if expected <= set(self._trial_log_end):
+                if expected <= set(self._trial_log_end) and all(self._trial_log_end[a].get("ok") and self._trial_log_end[a].get("records",0)>0 for a in expected):
                     fm_event(
-                        "[シーケンス] 両機分 LOG_END 済み。"
-                        "水上で STOP ALL を押すと FM に回収済み登録されます。"
+                        "[シーケンス] 両機からLOG_END通知を受信しました。"
+                        "CSVの実データ件数を検証するまで回収完了とは判定しません。"
                     )
         if not ok:
             self._trial_failed = True
@@ -1231,7 +1748,7 @@ class ExperimentSequenceController:
         snapshot = getattr(self.log_receiver, "snapshot_log_end", None)
         if not callable(snapshot):
             return
-        end = snapshot()
+        end = snapshot(sequence_id=str(self._state.get("sequence_id", "")))
         if not isinstance(end, dict):
             return
         for aid, (records, ok) in end.items():
@@ -1265,7 +1782,7 @@ class ExperimentSequenceController:
         )
         since = float(motion_end) - 300.0 if motion_end else time.time() - 1800.0
         finder = getattr(self.log_receiver, "find_merged_csv_for_agents", None)
-        merged = finder(expected, since) if callable(finder) else None
+        merged = finder(expected, since, sequence_id=str(self._state.get("sequence_id", ""))) if callable(finder) else None
         if not merged:
             return False
         session_id = Path(merged).parent.name.replace("merged_", "")
@@ -1275,6 +1792,8 @@ class ExperimentSequenceController:
             session_id = Path(merged).stem.replace("merged_", "")
         context = self._sequence_context(str(self._state.get("sequence_id", "")))
         self.handle_session_merged(session_id, merged, context)
+        if (self._state.get("final_upload") or {}).get("merged_csv")!=str(merged):
+            return False
         total_trials = int(self._state.get("total_trials", 0))
         summary = ", ".join(
             f"ID {aid}:{self._trial_log_end[aid]['records']}rec"
@@ -1306,6 +1825,20 @@ class ExperimentSequenceController:
         if set(self._trial_log_end) != expected or any(
             not bool(item.get("ok")) for item in self._trial_log_end.values()
         ):
+            return
+
+        import csv
+        try:
+            counts={a:0 for a in expected}
+            with open(merged_path,newline="") as handle:
+                for row in csv.DictReader(handle):
+                    aid=int(row["agent_id"])
+                    if aid not in expected:raise ValueError("unexpected agent")
+                    counts[aid]+=1
+            if any(counts[a]!=self._trial_log_end[a]["records"] for a in expected):
+                raise ValueError(f"CSV counts {counts} differ from LOG_END")
+        except (OSError,ValueError,KeyError) as exc:
+            self._append_event({"event":"MERGED_DATA_REJECTED","error":str(exc),"path":str(merged_path)})
             return
 
         self._state["final_upload"] = {

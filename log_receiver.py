@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import shutil
@@ -74,6 +75,7 @@ class LogReceiver:
         self._session_dir: Path | None = None
         self._log_end: dict[int, tuple[int, bool, float]] = {}
         self._last_raw_packet: dict[int, bytes] = {}
+        self._received_counts: dict[int, int] = {}
         self._metadata = SessionMetadataRecorder()
         self._sequence_context: dict[str, Any] | None = None
         self._on_session_merged: Callable[[str | None, str, dict[str, Any] | None], None] | None = None
@@ -105,6 +107,8 @@ class LogReceiver:
         self._session_id = None
         self._session_dir = None
         self._log_end.clear()
+        self._received_counts.clear()
+        self._last_raw_packet.clear()
         self._last_log_packet = None
         self._sequence_context = None
         self._metadata.reset()
@@ -119,23 +123,37 @@ class LogReceiver:
         self._metadata.record_experiment_event(agent_id, event)
 
     def set_sequence_context(self, context: dict[str, Any] | None) -> None:
+        # A new sequence must not inherit an incomplete upload from its predecessor.
         with self._lock:
-            if not context:
-                self._sequence_context = None
-                return
-            # Buffers may already exist from an on-water auto-upload; still attach
-            # sequence_id / agent_ids so merge + FM completion can run.
-            self._sequence_context = dict(context)
+            old_id=(self._sequence_context or {}).get("sequence_id")
+            new_id=(context or {}).get("sequence_id")
+            detach=bool(new_id and old_id!=new_id and (self._buffers or self._pending_files or self._log_end))
+        if detach:
+            self.flush_all()
+            with self._lock:
+                if self._session_dir:
+                    note=dict(reason="incomplete upload isolated before new sequence",previous_sequence=old_id,
+                              next_sequence=new_id,chunk_files=list(self._pending_files),
+                              received_counts=dict(self._received_counts),log_end=dict(self._log_end))
+                    (self._session_dir/"incomplete_upload.json").write_text(json.dumps(note,indent=2))
+                self._pending_files.clear()
+                self._buffers.clear();self._last_recv.clear()
+                self._reset_session()
+            fm_event(f"[Session] 前の未回収ログを別保存しました（{old_id} → {new_id}）。完了とは判定しません。")
+        with self._lock:
+            self._sequence_context=dict(context) if context else None
 
-    def snapshot_log_end(self) -> dict[int, tuple[int, bool]]:
+    def snapshot_log_end(self, sequence_id: str | None = None) -> dict[int, tuple[int, bool]]:
         with self._lock:
+            if sequence_id and (self._sequence_context or {}).get("sequence_id")!=sequence_id:
+                return {}
             return {
                 aid: (rec, ok)
                 for aid, (rec, ok, _ts) in self._log_end.items()
             }
 
     def find_merged_csv_for_agents(
-        self, agent_ids: set[int], since_epoch: float
+        self, agent_ids: set[int], since_epoch: float, sequence_id: str | None = None
     ) -> Optional[str]:
         """Latest merged CSV in experiments/ whose archive contains all agents."""
         if not EXPERIMENTS_DIR.is_dir():
@@ -144,6 +162,11 @@ class LogReceiver:
         for exp_dir in EXPERIMENTS_DIR.iterdir():
             if not exp_dir.is_dir():
                 continue
+            if sequence_id:
+                try:
+                    snap=json.loads((exp_dir/"sequence_plan.json").read_text())
+                    if snap.get("sequence_id")!=sequence_id:continue
+                except (OSError,ValueError):continue
             merged = exp_dir / f"merged_{exp_dir.name}.csv"
             if not merged.is_file():
                 continue
@@ -206,9 +229,10 @@ class LogReceiver:
             if missing_log_end:
                 return False
             missing_chunks = expected - agents_with_chunks
-            if missing_chunks and not fallback_ready:
+            if missing_chunks:
                 return False
-            return bool(agents_with_chunks)
+            return all(self._log_end[aid][1] and self._log_end[aid][0]>0
+                       and self._received_counts.get(aid,0)==self._log_end[aid][0] for aid in expected)
         return bool(agents_with_chunks) and (
             agents_with_chunks <= agents_with_log_end or fallback_ready
         )
@@ -251,12 +275,16 @@ class LogReceiver:
 
         with self._lock:
             self._ensure_session()
+            if records:
+                self._metadata.record_packet_clock(agent_id, send_micros, recv_time,
+                                                   records[0][0], records[-1][0], len(records))
             chunk_data, send_list, recv_list = self._buffers.get(agent_id, ([], [], []))
             was_empty = len(chunk_data) == 0
             if self._last_raw_packet.get(agent_id) == raw:
                 total = len(chunk_data)
             else:
                 chunk_data.extend(records)
+                self._received_counts[agent_id]=self._received_counts.get(agent_id,0)+len(records)
                 send_list.append(send_micros)
                 recv_list.append(recv_time)
                 self._buffers[agent_id] = (chunk_data, send_list, recv_list)
@@ -288,6 +316,13 @@ class LogReceiver:
         trial: int | None = None,
     ) -> None:
         with self._lock:
+            expected_seq=(self._sequence_context or {}).get("sequence_id")
+            if expected_seq and sequence_id!=expected_seq:
+                fm_event(f"[LOG_END] 別実験の通知を除外 agent={agent_id} seq={sequence_id} expected={expected_seq}")
+                return
+            previous=self._log_end.get(agent_id)
+            if previous and previous[:2]==(records,ok):
+                return
             # Firmware retries LOG_END up to 5×; after merge we reset the session.
             # Ignore late duplicates that would spawn an empty experiments/ folder.
             if self._session_id is None and agent_id not in self._buffers:
@@ -296,10 +331,11 @@ class LogReceiver:
             self._ensure_session()
             self._log_end[agent_id] = (records, ok, time.time())
             self._metadata.record_log_end(agent_id, records, ok, sequence_id, trial)
-        status = "OK" if ok else "FAILED"
+        received=self._received_counts.get(agent_id,0)
+        status = "OK" if ok and received==records else "件数不一致/転送失敗"
         seq_label = sequence_id or "-"
         fm_event(
-            f"======== ログ受信完了 agent={agent_id} records={records} {status} "
+            f"======== LOG_END通知 agent={agent_id} 受信={received}/予定={records} {status} "
             f"seq={seq_label} ========"
         )
         self.flush_agent(agent_id)
@@ -311,18 +347,19 @@ class LogReceiver:
                     fm_event(
                         f"[Session] マージ待ち LOG_END: agents {sorted(missing)}"
                     )
-                elif expected <= set(self._log_end.keys()):
+                elif self._session_ready_to_merge():
                     fm_event(
-                        f"[Session] 両機 LOG_END 揃いました → CSV マージします "
+                        f"[Session] 両機のデータ件数・正常LOG_ENDを確認 → CSV マージします "
                         f"(agents {sorted(expected)})"
                     )
+                else:
+                    fm_event(f"[Session] データ検証待ち: 受信 {self._received_counts}, LOG_END {dict((a,v[0]) for a,v in self._log_end.items())}")
         self._maybe_finalize_session()
 
     def flush_agent(self, agent_id: int) -> Optional[str]:
         with self._lock:
             buf = self._buffers.pop(agent_id, None)
             self._last_recv.pop(agent_id, None)
-            self._last_raw_packet.pop(agent_id, None)
         if not buf:
             return None
         chunk_data, send_list, recv_list = buf

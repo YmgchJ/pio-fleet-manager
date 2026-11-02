@@ -4,11 +4,32 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>PIO Fleet Manager</title>
-    <link rel="stylesheet" href="/static/style.css">
+    <script src="/static/theme.js?v=20261102"></script>
+    <link rel="stylesheet" href="/static/style.css?v=20261102-convergence">
+    <link rel="stylesheet" href="/static/dads-theme.css?v=20261102-theme">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <style>
         .tab-btn { background: transparent; border: 1px solid var(--border-light); color: var(--text-muted); padding: 0.5rem 1.5rem; border-radius: 8px; cursor: pointer; transition: 0.3s; }
         .tab-btn.active { background: var(--primary); color: #fff; border-color: var(--primary); }
+        details.fm-plan-collapsed > summary {
+            cursor: pointer;
+            list-style: none;
+            display: flex;
+            align-items: baseline;
+            flex-wrap: wrap;
+            gap: 0.35rem 0.75rem;
+        }
+        details.fm-plan-collapsed > summary::-webkit-details-marker { display: none; }
+        details.fm-plan-collapsed > summary::before {
+            content: '▸';
+            color: var(--text-muted);
+            font-size: 0.9rem;
+            margin-right: 0.35rem;
+        }
+        details.fm-plan-collapsed[open] > summary::before { content: '▾'; }
+        .fm-plan-collapsed-title { font-size: 1.15rem; font-weight: 600; margin: 0; }
+        .fm-plan-collapsed-hint { font-size: 0.82rem; color: var(--text-muted); font-weight: normal; }
+        .fm-plan-collapsed-body { margin-top: 0.85rem; }
     </style>
 </head>
 <body>
@@ -20,117 +41,66 @@
                     <svg width="24" height="24" fill="currentColor" viewBox="0 0 24 24"><path fill-rule="evenodd" clip-rule="evenodd" d="M12 2C6.477 2 2 6.477 2 12c0 4.42 2.865 8.166 6.839 9.489.5.092.682-.217.682-.482 0-.237-.008-.866-.013-1.7-2.782.603-3.369-1.34-3.369-1.34-.454-1.156-1.11-1.464-1.11-1.464-.908-.62.069-.608.069-.608 1.003.07 1.531 1.03 1.531 1.03.892 1.529 2.341 1.087 2.91.831.092-.646.35-1.086.636-1.336-2.22-.253-4.555-1.11-4.555-4.943 0-1.091.39-1.984 1.029-2.683-.103-.253-.446-1.27.098-2.647 0 0 .84-.269 2.75 1.025A9.578 9.578 0 0112 6.836c.85.004 1.705.114 2.504.336 1.909-1.294 2.747-1.025 2.747-1.025.546 1.377.203 2.394.1 2.647.64.699 1.028 1.592 1.028 2.683 0 3.842-2.339 4.687-4.566 4.935.359.309.678.919.678 1.852 0 1.336-.012 2.415-.012 2.743 0 .267.18.578.688.48C19.138 20.163 22 16.418 22 12c0-5.523-4.477-10-10-10z"></path></svg>
                 </a>
             </div>
-            
+
+            <details class="fm-header-settings" id="header-settings">
+                <summary aria-label="設定" title="設定">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="m9.5 3-.6 2.1-1.8 1L5 5.6 3 9l1.5 1.6v2.8L3 15l2 3.4 2.1-.5 1.8 1 .6 2.1h4l.6-2.1 1.8-1 2.1.5 2-3.4-1.5-1.6v-2.8L20 9l-2-3.4-2.1.5-1.8-1-.6-2.1z"/><circle cx="11.5" cy="12" r="3"/></svg>
+                </summary>
+                <div class="fm-settings-content">
+                    <h2>設定</h2>
+                    <div class="fm-theme-settings">
+                        <label for="display-theme">表示モード</label>
+                        <select id="display-theme">
+                            <option value="light">ライト</option>
+                            <option value="dark">ダーク</option>
+                            <option value="system">端末に合わせる</option>
+                        </select>
+                    </div>
+                    <div class="fm-firmware-settings">
             <!-- Firmware Selection -->
             <div style="display: flex; align-items: center; gap: 0.5rem; background: rgba(0,0,0,0.3); padding: 0.4rem 1rem; border-radius: 8px; border: 1px solid var(--border-light); flex-wrap: wrap;">
                 <label for="firmware-select" style="font-size: 0.85rem; color: var(--text-muted);">ファームウェア:</label>
                 <select id="firmware-select" style="background: var(--bg-dark); color: #fff; border: 1px solid var(--border-light); border-radius: 4px; padding: 0.2rem 0.5rem; font-size: 0.85rem;">
                     <option value="pico_robot">pico_robot</option>
                 </select>
-                <span style="color: var(--border-light);">|</span>
+            </div>
+
+                    </div>
+                    <div class="fm-wifi-settings">
                 <label for="wifi-ssid" style="font-size: 0.85rem; color: var(--text-muted);">Wi-Fi:</label>
                 <input id="wifi-ssid" type="text" placeholder="SSID" autocomplete="off"
                     style="width: 120px; background: var(--bg-dark); color: #fff; border: 1px solid var(--border-light); border-radius: 4px; padding: 0.2rem 0.5rem; font-size: 0.85rem;">
-                <input id="wifi-password" type="password" placeholder="Password" autocomplete="off"
+                <input id="wifi-password" aria-label="Wi-Fiパスワード" type="password" placeholder="Password" autocomplete="off"
                     style="width: 100px; background: var(--bg-dark); color: #fff; border: 1px solid var(--border-light); border-radius: 4px; padding: 0.2rem 0.5rem; font-size: 0.85rem;">
                 <button type="button" id="btn-save-wifi" class="btn btn-outline" style="padding: 0.2rem 0.6rem; font-size: 0.8rem;">保存</button>
-            </div>
-            
-            <!-- Global Upload Status -->
-            <div id="upload-progress-container" style="display: flex; align-items: center; gap: 1rem; background: rgba(0,0,0,0.3); padding: 0.4rem 1rem; border-radius: 8px; border: 1px solid var(--border-light); width: 350px;">
-                <div style="font-size: 0.8rem; font-weight: bold; width: 90px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" id="upload-status-text">待機中...</div>
-                <div style="flex: 1; height: 6px; background: rgba(255,255,255,0.1); border-radius: 3px; overflow: hidden;">
-                    <div id="upload-progress-bar" style="width: 0%; height: 100%; background: var(--accent-blue); transition: width 0.2s ease, background 0.3s ease;"></div>
-                </div>
-                <div style="font-size: 0.8rem; width: 35px; text-align: right;" id="upload-percent">0%</div>
-            </div>
-        </div>
-
+                    </div>
         <!-- Wi-Fi save status (full width — easy to spot) -->
         <div id="wifi-status-bar" style="display: none; width: 100%; padding: 0.55rem 1rem; border-radius: 8px; font-size: 0.9rem; box-sizing: border-box;">
             <span id="wifi-config-status"></span>
         </div>
 
-        <!-- Mini Fleet Connection Status (Sticky row) -->
-        <div id="global-fleet-status" style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
-            <!-- JS will populate this -->
-            <div style="font-size: 0.8rem; color: var(--text-muted);">モジュール状態を読み込み中...</div>
-        </div>
-    </header>
-
-    <div style="padding: 1rem 5%; display: flex; gap: 1rem; border-bottom: 1px solid rgba(255,255,255,0.1);">
-        <button id="btn-tab-fleet" class="tab-btn active" onclick="switchTab('fleet')">構成管理 (Fleet)</button>
-        <button id="btn-tab-monitor" class="tab-btn" onclick="switchTab('monitor')">モニタリングと制御 (Monitor)</button>
-        <button id="btn-tab-records" class="tab-btn" onclick="switchTab('records')">記録 (Records)</button>
-    </div>
-
-    <div id="tab-fleet" class="container">
-        <!-- Left Column: Registry & Terminal -->
-        <div style="display: flex; flex-direction: column; gap: 2rem;">
-            
-            <!-- Fleet Registry -->
-            <div class="glass-panel">
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem;">
-                    <h2 style="margin: 0;">
-                        <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 002-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path></svg>
-                        ロボット台帳 (Fleet Registry)
-                    </h2>
-                    <button class="btn btn-outline" id="btn-batch-ota" style="display: flex; align-items: center; gap: 0.5rem; background: rgba(59,130,246,0.1); border-color: rgba(59,130,246,0.4); color: #60a5fa; padding: 0.5rem 1rem;">
-                        <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
-                        </svg>
-                        全機一括OTA (オンラインのみ)
-                    </button>
-                </div>
-                <div class="device-list" id="fleet-list">
-                    <div class="empty-state">台帳を読み込み中...</div>
-                </div>
+            <!-- System Management -->
+            <details class="fm-settings-section" id="system-management-settings">
+                <summary>システム管理</summary>
+                <div class="fm-settings-section-body">
+                <button class="btn" style="width: 100%; margin-bottom: 0.5rem; background: transparent; border: 1px solid var(--text-muted); color: var(--text-main);" onclick="startUpload('build', 'auto')">
+                    コンパイルテスト (書き込まずにエラーチェック)
+                </button>
+                <button class="btn" style="width: 100%; margin-bottom: 0.5rem;" onclick="loadFleet()">
+                    台帳を更新
+                </button>
             </div>
-
-
-            
-        </div>
-
-        <!-- Right Column: Discovery & Tools -->
-        <div style="display: flex; flex-direction: column; gap: 2rem;">
-            
-            <!-- Sticky Wrapper for Terminal -->
-            <div style="position: sticky; top: 180px; display: flex; flex-direction: column; gap: 2rem; z-index: 10;">
-                <!-- Terminal output -->
-                <div class="glass-panel terminal-section" style="display: flex; flex-direction: column; margin: 0;">
-                    <h2>
-                        <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
-                        Terminal
-                    </h2>
-                    
-                    <p style="font-size: 0.75rem; color: var(--text-muted); margin: 0 0 0.5rem 0;">
-                        ログ受信・STOP ALL・マージ完了はここと uvicorn の標準出力に表示（OTA 開始時は下の欄がクリアされます）。
-                    </p>
-                    <div class="terminal" id="terminal" style="flex: 1; max-height: 250px; overflow-y: auto;">
-                        <div class="terminal-line" style="color: #8b92a5;">待機中… Monitor で STOP ALL 後、構成管理タブでも同じ行が出ます。</div>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Latest Memos Panel (Not sticky) -->
-            <div class="glass-panel" style="margin: 0; display: flex; flex-direction: column;">
-                <h2>最新のメモ</h2>
-                <div id="latest-memos-list" style="font-size: 0.85rem; color: var(--text-muted);">
-                    <!-- JS will populate -->
-                    <div style="text-align: center; padding: 1rem;">読込中...</div>
-                </div>
-            </div>
+            </details>
 
             <!-- Discovery Panel -->
-            <div class="glass-panel">
-                <h2>
-                    【新規のみ】デバイス検出と初期登録 (Scan)
-                </h2>
+            <details class="fm-settings-section" id="device-registration-settings">
+                <summary>【新規のみ】デバイス検出と初期登録</summary>
+                <div class="fm-settings-section-body">
                 <div style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 1rem; background: rgba(255,255,255,0.05); padding: 0.75rem; border-radius: 8px; border-left: 3px solid #3b82f6;">
                     <p style="margin: 0 0 0.5rem 0;">※ ここは<strong>【未登録の新品】専用</strong>です。登録済み機体は下部リストから更新してください。</p>
-                    
+
                     <details>
-                        <summary style="cursor: pointer; color: #3b82f6; font-weight: bold; outline: none; user-select: none;">詳しい登録手順（クリックで展開）</summary>
+                        <summary style="cursor: pointer; color: #3b82f6; font-weight: bold; outline: none; user-select: none;">詳しい登録手順</summary>
                         <div style="margin-top: 0.5rem; padding: 0.75rem; background: rgba(0,0,0,0.2); border-radius: 6px; line-height: 1.5;">
                             <p style="margin: 0 0 0.5rem 0;"><strong>【STEP 1】初期プログラムの書き込み</strong><br>
                             工場出荷時の新品基板は、PCからの自動再起動命令を受け取れません。<strong>最初の1回目だけは、基板上の白いボタン(BOOTSEL)を押しながらUSBを繋ぎ</strong>、すぐ下の「未登録基板へ強制書き込み」を押してください。</p>
@@ -149,9 +119,9 @@
                         <option value="">ポートを選択...</option>
                     </select>
                 </div>
-                
+
                 <button class="btn btn-primary" id="btn-scan" style="width: 100%; margin-bottom: 0.5rem;">
-                    ポートをスキャン (登録用)
+                    ポートをスキャン
                 </button>
                 <button class="btn btn-usb" style="width: 100%;" onclick="startUpload('usb', document.getElementById('port-select').value || 'auto')">
                     未登録基板へ強制書き込み (BOOTSEL兼用)
@@ -161,17 +131,65 @@
                     <!-- Filled by JS -->
                 </div>
             </div>
+            </details>
 
-            <!-- System Management -->
+                </div>
+            </details>
+        </div>
+
+        <!-- Mini Fleet Connection Status (Sticky row) -->
+        <div id="global-fleet-status" style="display: flex; gap: 0.5rem; flex-wrap: wrap;">
+            <!-- JS will populate this -->
+            <div style="font-size: 0.8rem; color: var(--text-muted);">モジュール状態を読み込み中...</div>
+        </div>
+    </header>
+
+    <div style="padding: 1rem 5%; display: flex; gap: 1rem; border-bottom: 1px solid rgba(255,255,255,0.1);">
+        <button id="btn-tab-fleet" class="tab-btn active" onclick="switchTab('fleet')">構成管理</button>
+        <button id="btn-tab-monitor" class="tab-btn" onclick="switchTab('monitor')">モニタリングと制御</button>
+        <button id="btn-tab-records" class="tab-btn" onclick="switchTab('records')">記録</button>
+    </div>
+
+    <div id="tab-fleet" class="container">
+        <!-- Left Column: Registry & Terminal -->
+        <div style="display: flex; flex-direction: column; gap: 2rem;">
+
+            <!-- Fleet Registry -->
             <div class="glass-panel">
-                <h2>システム管理</h2>
-                <button class="btn" style="width: 100%; margin-bottom: 0.5rem; background: transparent; border: 1px solid var(--text-muted); color: var(--text-main);" onclick="startUpload('build', 'auto')">
-                    コンパイルテスト (書き込まずにエラーチェック)
-                </button>
-                <button class="btn" style="width: 100%; margin-bottom: 0.5rem;" onclick="loadFleet()">
-                    台帳を更新
-                </button>
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem;">
+                    <h2 style="margin: 0;">
+                        <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 002-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"></path></svg>
+                        ロボット台帳
+                    </h2>
+
+                </div>
+                <div class="device-list" id="fleet-list">
+                    <div class="empty-state">台帳を読み込み中...</div>
+                </div>
             </div>
+
+
+
+        </div>
+
+        <!-- Right Column: Discovery & Tools -->
+        <div style="display: flex; flex-direction: column; gap: 2rem;">
+
+            <!-- Sticky Wrapper for Terminal -->
+            <div style="position: sticky; top: 180px; display: flex; flex-direction: column; gap: 2rem; z-index: 10;">
+                <!-- Terminal output -->
+                <div class="glass-panel terminal-section" style="display: flex; flex-direction: column; margin: 0;">
+                    <h2>
+                        <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
+                        Terminal
+                    </h2>
+                    <div class="terminal" id="terminal" style="overflow-y: auto;">
+                        <div class="terminal-line" style="color: #8b92a5;">待機中… Monitor で STOP ALL 後、構成管理タブでも同じ行が出ます。</div>
+                    </div>
+                </div>
+            </div>
+
+
 
         </div>
     </div>
@@ -179,56 +197,191 @@
     <!-- Monitoring Tab -->
     <div id="tab-monitor" class="container" style="display: none; flex-direction: column;">
         <div class="glass-panel" style="margin-bottom: 2rem;">
+            <div class="fm-global-heading">
             <h2 style="display: flex; justify-content: space-between; align-items: center;">
                 <span>
                     <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="vertical-align: middle;"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
-                    フリート一斉制御 (Global Command)
+                    フリート一斉制御
                 </span>
             </h2>
-            <div style="display: flex; gap: 1rem; margin-top: 1rem;">
-                <button id="btn-global-start" class="btn btn-primary" style="flex: 1; padding: 1rem; font-size: 1.2rem; background: #10b981;" onclick="sendGlobalCommand('START')">▶ START ALL (一斉開始)</button>
-                <button class="btn btn-primary" style="flex: 1; padding: 1rem; font-size: 1.2rem; background: #ef4444;" onclick="sendGlobalCommand('STOP')">■ STOP ALL（全機UDP＋ログ回収）</button>
+            <div class="fm-ota-actions fm-global-progress fm-heading-progress"><div id="upload-progress-container" style="display: flex; align-items: center; gap: 1rem; background: rgba(0,0,0,0.3); padding: 0.4rem 1rem; border-radius: 8px; border: 1px solid var(--border-light); width: 350px;">
+                <div style="font-size: 0.8rem; font-weight: bold; width: 90px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" id="upload-status-text">待機中...</div>
+                <div style="flex: 1; height: 6px; background: rgba(255,255,255,0.1); border-radius: 3px; overflow: hidden;">
+                    <div id="upload-progress-bar" style="width: 0%; height: 100%; background: var(--accent-blue); transition: width 0.2s ease, background 0.3s ease;"></div>
+                </div>
+                <div style="font-size: 0.8rem; width: 35px; text-align: right;" id="upload-percent">0%</div>
+            </div></div>
             </div>
+            <div class="fm-global-controls" style="display: flex; gap: 1rem; margin-top: 1rem;">
+                <button class="btn btn-outline" id="btn-batch-ota" style="display: flex; align-items: center; gap: 0.5rem; background: rgba(59,130,246,0.1); border-color: rgba(59,130,246,0.4); color: #60a5fa; padding: 0.5rem 1rem;">
+                        <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                        </svg>
+                        一括OTA
+                    </button>
+                <button id="btn-global-start" class="btn btn-primary" style="flex: 1; padding: 1rem; font-size: 1.2rem; background: #10b981;" onclick="sendGlobalCommand('START')">▶ START ALL</button>
+                <button class="btn btn-primary" style="flex: 1; padding: 1rem; font-size: 1.2rem; background: #ef4444;" onclick="sendGlobalCommand('STOP')">■ STOP ALL</button>
+            </div>
+
         </div>
 
-        <div class="glass-panel" id="paddle-plan-panel" style="margin-bottom:1rem; border-left:4px solid #38bdf8;">
-            <h2>パドル比較 A：固定位相差の開ループ測定</h2>
-            <p style="margin-top:0.6rem;line-height:1.7;">まず40 mmから開始。ID 12 / 13（偶数=基準・奇数=−Δφ）、両機 ω=3π rad/s、κ=0。8位相差 × 30秒を自動実行し、10–30秒を解析します。1セット約5分40秒、最初の動作は開始予約から30秒後です。</p>
-            <div id="paddle-plan-presets" class="paddle-presets" aria-label="パドルと反復セットの選択"></div>
-            <p id="paddle-plan-active" aria-live="polite">条件を読込中…</p>
-            <p id="paddle-plan-order" style="margin-top:0.5rem;line-height:1.7;"></p>
-            <p id="paddle-plan-ready" style="margin-top:0.5rem;line-height:1.7;color:#fbbf24;"></p>
-            <p style="margin-top:0.65rem;color:var(--text-muted);line-height:1.7;">A1・A2：設計用。A3：未使用の検証用。条件選択後、実機の値が一致しない場合は停止状態で再起動し、下の「自動シーケンス開始」を押します。終了後は水上で「STOP ALL」→2台分のログ回収を確認してください。「回収済」は解析の合格判定とは別です。</p>
-            <details style="margin-top:0.7rem;line-height:1.7;"><summary>実験時の記録と次の段階</summary><p>パドル寸法・連結配置・水深・電池電圧・動画の時刻を記録してください。セットを分けて入水し直し、40/80 mmの順序は反復間で入れ替えます。電流sは既存ログからの再構成値です。A1・A2からZと目標位相差を決め、A3と閉ループ復帰試験で検証します。閉ループ条件は解析後に設定します。</p></details>
-        </div>
+        <details class="glass-panel fm-plan-collapsed" id="current-convergence-plan-panel" open style="margin-bottom:1rem; border-left:4px solid #38bdf8;">
+            <summary><span class="fm-plan-collapsed-title">60 mm電流FB：初期位相差からの収束（Zopt,10）</span></summary>
+            <div class="fm-plan-collapsed-body">
+                <table class="fm-experiment-conditions" aria-label="初期位相差実験の条件">
+                    <tbody>
+                        <tr><th scope="row">制御</th><td>Zopt,10 · κ = 1 · Δω = 0</td></tr>
+                        <tr><th scope="row">電流入力</th><td>MA5 · 事前中心補正 · 固定幅 · 周期平均なし</td></tr>
+                        <tr><th scope="row">初期位相差</th><td>±30° / ±90° / ±150° <span class="fm-condition-note">セットごとに順序変更</span></td></tr>
+                        <tr><th scope="row">試行数</th><td>6条件 × 5セット = 30試行</td></tr>
+                        <tr><th scope="row">時間</th><td>120秒 / 試行 · FB開始10秒</td></tr>
+                        <tr><th scope="row">保存</th><td>25 Hz · 約18,000点 / 機・セット</td></tr>
+                        <tr><th scope="row">事前補正</th><td>各セット前に60秒測定</td></tr>
+                    </tbody>
+                </table>
+                <ol class="fm-experiment-steps" aria-label="各セットの手順">
+                    <li>補正60秒・回収</li>
+                    <li>補正ログ選択</li>
+                    <li>6試行・回収</li>
+                </ol>
+                <div id="current-convergence-presets"></div>
+                <p id="current-convergence-active" aria-live="polite"></p>
+                <p id="current-convergence-ready" aria-live="polite"></p>
+            </div>
+        </details>
+
+        <details class="glass-panel fm-plan-collapsed fm-plan-archive" id="past-experiment-plans">
+            <summary><span class="fm-plan-collapsed-title">過去・その他の実験</span></summary>
+            <div class="fm-plan-collapsed-body">
+        <details class="glass-panel fm-plan-collapsed" id="paddle-plan-panel" style="margin-bottom:1rem; border-left:4px solid #38bdf8;">
+            <summary>
+                <span id="paddle-plan-heading" class="fm-plan-collapsed-title">パドル比較 A：固定位相差の開ループ測定</span>
+                <span class="fm-plan-collapsed-hint">普段は閉じる・必要時に開く</span>
+            </summary>
+            <div class="fm-plan-collapsed-body">
+                <p id="paddle-plan-summary" style="margin-top:0;line-height:1.7;">設定を確認中…</p>
+                <div id="paddle-plan-presets" class="paddle-presets" aria-label="パドルと反復セットの選択"></div>
+                <p id="paddle-plan-active" aria-live="polite">条件を読込中…</p>
+                <p id="paddle-plan-order" style="margin-top:0.5rem;line-height:1.7;"></p>
+                <p id="paddle-plan-ready" style="margin-top:0.5rem;line-height:1.7;color:#fbbf24;"></p>
+                <p style="margin-top:0.65rem;color:var(--text-muted);line-height:1.7;">条件選択後、実機の値が一致しない場合は停止状態で再起動し、下の「自動シーケンス開始」を押します。終了後は水上で「STOP ALL」→2台分のログ回収を確認してください。「回収済」は解析の合格判定とは別です。</p>
+                <details style="margin-top:0.7rem;line-height:1.7;"><summary>実験時の記録と次の段階</summary><p id="paddle-plan-instructions">パドル寸法・連結配置・水深・電池電圧・動画の時刻を記録してください。</p></details>
+            </div>
+        </details>
+
+        <details class="glass-panel fm-plan-collapsed" id="flex-kappa1-plan-panel" style="margin-bottom:1rem; border-left:4px solid #34d399;">
+            <summary><span class="fm-plan-collapsed-title">曲げ FB：κ=1・7点 Δω（完了分）</span><span class="fm-plan-collapsed-hint">必要時に展開</span></summary>
+            <div class="fm-plan-collapsed-body">
+            <p style="margin-top:0.6rem;line-height:1.7;">実機 M=N=10 の Z_opt/Z_sin・κ=1（0–10 s は0）・ω₁=3π・Δω（rad/s）7点・試行120 s・解析60–120 s・ログ25 Hz（7×120×25=21 000）。初期位相は MuJoCo <code>flex_kappa1_7point</code> JSON（φ1→12、φ2→13）。</p>
+            <div id="flex-kappa1-plan-presets" class="paddle-presets" aria-label="flex kappa1 条件"></div>
+            <p id="flex-kappa1-plan-active" aria-live="polite">読込中…</p>
+            <p id="flex-kappa1-plan-order" style="margin-top:0.5rem;line-height:1.7;"></p>
+            <p id="flex-kappa1-plan-ready" style="margin-top:0.5rem;line-height:1.7;color:#fbbf24;"></p>
+            <p style="margin-top:0.65rem;color:var(--text-muted);line-height:1.7;">ログ上限 21 000 件（7×120×25）。OTA は <code>ota_flex_fb</code>。旧 flex_hw κ=5・13点とは別プリセット。</p>
+            </div>
+        </details>
+
+        <details class="glass-panel fm-plan-collapsed" id="flex-kappa1-interleaved-plan-panel" style="margin-bottom:1rem; border-left:4px solid #2dd4bf;">
+            <summary><span class="fm-plan-collapsed-title">曲げ FB：κ=1・追加6点 Δω（完了分）</span><span class="fm-plan-collapsed-hint">必要時に展開</span></summary>
+            <div class="fm-plan-collapsed-body">
+            <p style="margin-top:0.6rem;line-height:1.7;">完了済み7点の間の Δω（rad/s）6点のみ。Z・κ・120 s・60–120 s 解析・25 Hz は各パドルの7点セッションと同じ係数。ログ 6×120×25=18 000 件／台。初期位相は seed <code>20261024+paddle_mm</code>（zopt/zsin 共通）。</p>
+            <div id="flex-kappa1-interleaved-plan-presets" class="paddle-presets" aria-label="flex kappa1 追加点"></div>
+            <p id="flex-kappa1-interleaved-plan-active" aria-live="polite">読込中…</p>
+            <p id="flex-kappa1-interleaved-plan-order" style="margin-top:0.5rem;line-height:1.7;"></p>
+            <p id="flex-kappa1-interleaved-plan-ready" style="margin-top:0.5rem;line-height:1.7;color:#fbbf24;"></p>
+            <p style="margin-top:0.65rem;color:var(--text-muted);line-height:1.7;">7点パネルとは別 plan ID。選択すると <code>current_phase_sequence.yaml</code> を上書きします（バックアップは <code>flex_kappa1_interleaved_plan_backups</code>）。</p>
+            </div>
+        </details>
+
+        <details class="glass-panel fm-plan-collapsed" id="flex-hw-plan-panel" style="margin-bottom:1rem; border-left:4px solid #a78bfa;">
+            <summary>
+                <span class="fm-plan-collapsed-title">曲げ FB 位相ロック（flex_hw_lock_v1）</span>
+                <span class="fm-plan-collapsed-hint">κ=5・13点・普段は閉じる</span>
+            </summary>
+            <div class="fm-plan-collapsed-body">
+                <p style="margin-top:0;line-height:1.7;">開ループ実機同定（曲げ a2・<strong>M=N=10</strong>・曲面 min/max 正規化後プール）の Z_opt / Z_sin。κ=5・ω=3π・Δω/π∈[−0.3,0.3] 13点・試行60 s（FB 10 s 以降）・ログ25 Hz。ID <strong>12/13</strong>・<code>pico_w_flex_fb</code> 必須。</p>
+                <div id="flex-hw-plan-presets" class="paddle-presets" aria-label="flex HW 条件"></div>
+                <p id="flex-hw-plan-active" aria-live="polite">読込中…</p>
+                <p id="flex-hw-plan-order" style="margin-top:0.5rem;line-height:1.7;"></p>
+                <p id="flex-hw-plan-ready" style="margin-top:0.5rem;line-height:1.7;color:#fbbf24;"></p>
+                <p style="margin-top:0.65rem;color:var(--text-muted);line-height:1.7;">OTA: この条件を選んだ状態で Fleet の Flash/一括 OTA は <code>ota_flex_fb</code>（<code>fw:pico_robot_flex</code>）を使います。電流専用 <code>ota</code> だけ入れていると準備 ✓ になりません。</p>
+                <p style="margin-top:0.45rem;color:var(--text-muted);line-height:1.7;">1) 条件選択 → 2) flex FB を OTA・停止で params 再取得（✓）→ 3) 自動シーケンス開始 → 4) STOP ALL・ログ回収。</p>
+            </div>
+        </details>
+
+        <details class="glass-panel fm-plan-collapsed" id="dual-recovery-plan-panel" style="margin-bottom:1rem;border-left:4px solid #a78bfa;">
+            <summary><span class="fm-plan-collapsed-title">60 mm 復帰性能：B vs 固定校正の曲げ単独</span></summary>
+            <div class="fm-plan-collapsed-body">
+                <p>各制御則4試行・各120秒、κ1・Δω0・FB開始10秒。60秒と90秒にID13へ符号を逆にした±30°の位相外乱を加えます。符号順序は試行ごとに交互とし、両制御則で均等にします。</p>
+                <p>共通校正60秒 → ブロック1（B・曲げ・曲げ・B）→ ブロック2（曲げ・B・B・曲げ）。各ブロック約9分20秒、駆動合計16分。8試行を通して同じ校正値を固定します。</p>
+                <div id="dual-recovery-presets"></div><p id="dual-recovery-active" aria-live="polite"></p><p id="dual-recovery-ready" aria-live="polite"></p>
+                <p style="color:var(--text-muted)">最初に共通校正を選択し、専用FW ota_two_sensor_recovery を両機へ明示的に書き込んでください。校正を回収後、ロボットを再起動せず各ブロックを選択 → 適用 → 読戻し → 自動シーケンス開始。外乱はFW内で自律実行し、制御則も試行間に自動切替します。曲げ単独は従来の移動窓方式ではなく、Bと同じ固定校正で再設計した対照です。</p>
+            </div>
+        </details>
+
+        <details class="glass-panel fm-plan-collapsed" id="dual-sensor-plan-panel" style="margin-bottom:1rem; border-left:4px solid #34d399;">
+            <summary><span class="fm-plan-collapsed-title">60 mm 曲げ＋電流：B・C各7条件</span></summary>
+            <div class="fm-plan-collapsed-body">
+                <p>B：同位相への復帰率を最大化。C：単独の復帰率を保ち残差変動を低減。Δω＝−0.3〜＋0.3 rad/sを0.1刻み・κ1・各120秒、開始10秒からFB、評価60–120秒。B/Cの全条件で直近の60 mm電流Δω=0の開始位相を共通に使います。</p>
+                <p>①B校正60秒 → ②B7条件・約16分 → ③C校正60秒 → ④C7条件・約16分。各シーケンス後にログを回収します。両センサを同時校正し、閉ループ中は中心・幅を固定します。既存の曲げ単独データは参考比較に使います。</p>
+                <div id="dual-sensor-presets"></div>
+                <p id="dual-sensor-active" aria-live="polite"></p>
+                <p id="dual-sensor-ready" aria-live="polite"></p>
+                <p style="color:var(--text-muted)">最初に校正条件を選び、専用FWを明示的に書き込んでください。校正後は再起動・パラメータ再取得をせず、本試行を選択 → 校正値・制御則を適用 → 読戻し確認 → 自動シーケンス開始。条件選択だけでは実機に送信しません。各Δωは1回の測定です。ロック範囲・位相差・定常変動を比較します。復帰率や統計的な改善の確証には追加実験が必要です。</p>
+            </div>
+        </details>
+
+        <details class="glass-panel fm-plan-collapsed" id="current-cycle-plan-panel" style="margin-bottom:1rem; border-left:4px solid #38bdf8;">
+            <summary><span class="fm-plan-collapsed-title">60 mm電流FB：Zopt,10・同位相2周期平均</span></summary>
+            <div class="fm-plan-collapsed-body">
+                <p>生電流 → MA5 → 現在と前周期の同じ自位相の電流を平均 → 補正済み固定中心・固定幅で正規化 → Zopt,10との積。Z・κ・幅は維持します。</p>
+                <p>①新規補正測定60秒（周期平均なし・κ0）を回収 → ②2周期平均7点 → ③同じ補正値で追加6点。ID12/13・κ1・各120秒・評価60–120秒・判定36°・保存25 Hz。既存と同じ13点を各1回測定します。</p>
+                <div id="current-cycle-presets"></div>
+                <p id="current-cycle-active" aria-live="polite">読込中…</p>
+                <p id="current-cycle-ready" aria-live="polite"></p>
+                <p style="color:var(--text-muted)">2周期平均対応FWが必要です。条件選択後にパラメータ同期と読戻しを確認し、自動シーケンスで開始してください。履歴は各試行の最初の10秒で蓄積します。補正測定から13点終了までに電池・取り付けを変えた場合は、新しい補正測定からやり直してください。</p>
+            </div>
+        </details>
+
+        <details class="glass-panel fm-plan-collapsed" id="current-offset-plan-panel" style="margin-bottom:1rem; border-left:4px solid #38bdf8;">
+            <summary><span class="fm-plan-collapsed-title">電流 FB：開始前の中心補正・Zopt,1 vs Zopt,10</span></summary>
+            <div class="fm-plan-collapsed-body">
+                <p>各パドル・各Zの13点につき補正測定1回。①κ=0で60秒（ω₁=3π・ω₂=2.9π、保存50 Hz）→ログ回収→10–50秒から機体別の電流増加分を計算→②7点→③追加6点。同じ補正値を13点中固定します。</p>
+                <p>補正は中心のみ：c′=c+平均［MA5(I)−同定10試行平均の予測電流］。幅・Z・κ・MA5は変更しません。閉ループはκ=1・各120秒・評価60–120秒・保存25 Hz。各条件選択後にパラメータ同期と読戻しを確認し、下の自動シーケンスで開始してください。</p>
+                <div id="current-offset-presets"></div>
+                <p id="current-offset-active" aria-live="polite">読込中…</p>
+                <p id="current-offset-ready" aria-live="polite"></p>
+                <p style="color:var(--text-muted)">補正測定後から追加6点終了まで、電池・パドル・取り付けを変更した場合は、その13点を新しい補正測定からやり直してください。従来の補正なし条件は下の折りたたみに残しています。</p>
+            </div>
+        </details>
+
+        <details class="glass-panel fm-plan-collapsed" id="current-zopt-plan-panel" style="margin-bottom:1rem; border-left:4px solid #38bdf8;">
+            <summary>
+                <span class="fm-plan-collapsed-title">電流 FB：Zopt,1 vs Zopt,10・13点（7＋6）</span>
+                <span class="fm-plan-collapsed-hint">今回の実験・完了分は折りたたみ</span>
+            </summary>
+            <div class="fm-plan-collapsed-body">
+                <p style="margin-top:0;line-height:1.7;">電流 S は <strong>M=N=2</strong>・MA5・固定尺度 \((I-c_i)/d_i\)。Z だけ A/B 切替。κ=1・ω₁=3π・Δω=ω₂−ω₁（rad/s）−0.30〜＋0.30を0.05刻み13点（7＋6分割）。120 s/試行・解析60–120 s・電流MA5更新50 Hz・保存25 Hz・制御500 Hz。ID <strong>12/13</strong>・<code>pico_w</code>（固定尺度 FW OTA 後）。</p>
+                <div id="current-zopt-plan-presets" class="paddle-presets" aria-label="電流 Z 比較条件"></div>
+                <p id="current-zopt-plan-active" aria-live="polite">読込中…</p>
+                <p id="current-zopt-plan-order" style="margin-top:0.5rem;line-height:1.7;"></p>
+                <p id="current-zopt-plan-ready" style="margin-top:0.5rem;line-height:1.7;color:#fbbf24;"></p>
+                <p style="margin-top:0.65rem;color:var(--text-muted);line-height:1.7;">パドル交換は手動。各サイズで「Zopt,1（1試行）」→「Zopt,10（10試行平均S）」の順。Zsinは比較に含めません。曲げ flex_hw 条件とは別プリセット（上書きしないようバックアップ付き選択）。</p>
+            </div>
+        </details>
+
+            </div>
+        </details>
 
         <div class="glass-panel" id="phase-sequence-panel" style="margin-bottom: 2rem; border-left: 4px solid #f59e0b;">
             <h2 style="display: flex; justify-content: space-between; align-items: center;">
-                <span id="phase-sequence-title">自動実験：大パドル・電流同期</span>
+                <span id="phase-sequence-title">パラメータ・実機確認</span>
                 <span id="phase-sequence-state" style="font-size: 0.85rem; color: var(--text-muted);">未開始</span>
             </h2>
             <div id="phase-sequence-description" style="font-size: 0.9rem; line-height: 1.6; color: var(--text-muted); margin-top: 0.75rem;">
                 シーケンス設定を確認中…
             </div>
-            <div id="phase-config-editor" style="margin-top: 1rem; padding: 0.85rem; border: 1px solid rgba(255,255,255,0.12); border-radius: 8px; background: rgba(0,0,0,0.16);">
-                <div style="font-size: 0.82rem; color: #cbd5e1; margin-bottom: 0.65rem; font-weight: 600;">PRC 切替（z(ψ) の形）</div>
-                <div style="display: flex; align-items: flex-end; gap: 0.75rem; flex-wrap: wrap;">
-                    <label style="font-size: 0.78rem; color: var(--text-muted); min-width: 10rem;">
-                        PRC
-                        <select id="experiment-z-mode" style="display:block; width:100%; margin-top:0.25rem; background:var(--bg-dark); color:#fff; border:1px solid var(--border-light); border-radius:4px; padding:0.35rem;">
-                            <option value="zsin">z_sin</option>
-                            <option value="zopt">z_opt</option>
-                            <option value="cos">cos</option>
-                        </select>
-                    </label>
-                    <button id="btn-save-experiment-config" class="btn btn-outline" style="padding:0.45rem 0.8rem;">PRC を保存</button>
-                    <button type="button" id="btn-reload-experiment-config" class="btn btn-outline" style="padding:0.45rem 0.8rem;">設定を再読込</button>
-                    <span id="experiment-config-status" style="font-size:0.8rem; color:var(--text-muted);">読込中…</span>
-                </div>
-                <div style="font-size:0.78rem; color:#94a3b8; margin-top:0.65rem; line-height:1.5;">
-                    <code>activate_*.sh</code> で YAML を差し替えたあとは<strong>「設定を再読込」</strong>でシーケンス表示を更新できます（FM プロセスの再起動は不要）。Monitor の zmode/κ/ω は<strong>実機が一度読み込んだ値</strong>のため、PRC 変更後は<strong>各機リブート</strong>（または OTA 再起動）が必要です。
-                </div>
-            </div>
+
             <div style="display: flex; gap: 0.75rem; align-items: center; margin-top: 1rem; flex-wrap: wrap;">
                 <button id="btn-start-phase-sequence" class="btn" style="background: #f59e0b; color: #111827; font-weight: 700; padding: 0.8rem 1.2rem;" onclick="startPhaseSequence()">
                     ▶ 自動シーケンス開始
@@ -244,7 +397,7 @@
             <!-- Chart Panel Template -->
             <div class="glass-panel">
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
-                    <h2 style="margin: 0; font-size: 1.1rem;">サーボ角度 (Angle)</h2>
+                    <h2 style="margin: 0; font-size: 1.1rem;">サーボ角度</h2>
                     <div style="display: flex; gap: 0.25rem;">
                         <input type="number" id="minAngle" value="0" style="width: 50px; background: rgba(0,0,0,0.3); border: 1px solid var(--border-light); color: #fff; border-radius: 4px; padding: 2px 4px; font-size: 0.8rem;" onchange="updateChartScale('Angle')">
                         <span style="color: var(--text-muted);">~</span>
@@ -255,10 +408,10 @@
                     <canvas id="chartAngle"></canvas>
                 </div>
             </div>
-            
+
             <div class="glass-panel">
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
-                    <h2 style="margin: 0; font-size: 1.1rem;">曲げセンサ (Flex・実験では未使用)</h2>
+                    <h2 style="margin: 0; font-size: 1.1rem;">曲げセンサ（実験では未使用）</h2>
                     <div style="display: flex; gap: 0.25rem;">
                         <input type="number" id="minFlex" value="500" style="width: 50px; background: rgba(0,0,0,0.3); border: 1px solid var(--border-light); color: #fff; border-radius: 4px; padding: 2px 4px; font-size: 0.8rem;" onchange="updateChartScale('Flex')">
                         <span style="color: var(--text-muted);">~</span>
@@ -269,10 +422,10 @@
                     <canvas id="chartFlex"></canvas>
                 </div>
             </div>
-            
+
             <div class="glass-panel">
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
-                    <h2 style="margin: 0; font-size: 1.1rem;">光センサ (Light)</h2>
+                    <h2 style="margin: 0; font-size: 1.1rem;">光センサ</h2>
                     <div style="display: flex; gap: 0.25rem;">
                         <input type="number" id="minLight" value="0" style="width: 50px; background: rgba(0,0,0,0.3); border: 1px solid var(--border-light); color: #fff; border-radius: 4px; padding: 2px 4px; font-size: 0.8rem;" onchange="updateChartScale('Light')">
                         <span style="color: var(--text-muted);">~</span>
@@ -283,10 +436,10 @@
                     <canvas id="chartLight"></canvas>
                 </div>
             </div>
-            
+
             <div class="glass-panel">
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
-                    <h2 style="margin: 0; font-size: 1.1rem;">電流センサ (Current)</h2>
+                    <h2 style="margin: 0; font-size: 1.1rem;">電流センサ</h2>
                     <div style="display: flex; gap: 0.25rem;">
                         <input type="number" id="minCurrent" value="0" style="width: 50px; background: rgba(0,0,0,0.3); border: 1px solid var(--border-light); color: #fff; border-radius: 4px; padding: 2px 4px; font-size: 0.8rem;" onchange="updateChartScale('Current')">
                         <span style="color: var(--text-muted);">~</span>
@@ -300,7 +453,7 @@
 
             <div class="glass-panel">
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
-                    <h2 style="margin: 0; font-size: 1.1rem;">消費電力 (Power)</h2>
+                    <h2 style="margin: 0; font-size: 1.1rem;">消費電力</h2>
                     <div style="display: flex; gap: 0.25rem;">
                         <input type="number" id="minPower" value="0" style="width: 50px; background: rgba(0,0,0,0.3); border: 1px solid var(--border-light); color: #fff; border-radius: 4px; padding: 2px 4px; font-size: 0.8rem;" onchange="updateChartScale('Power')">
                         <span style="color: var(--text-muted);">~</span>
@@ -311,10 +464,10 @@
                     <canvas id="chartPower"></canvas>
                 </div>
             </div>
-            
+
             <div class="glass-panel">
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
-                    <h2 style="margin: 0; font-size: 1.1rem;">電圧 (Voltage)</h2>
+                    <h2 style="margin: 0; font-size: 1.1rem;">電圧</h2>
                     <div style="display: flex; gap: 0.25rem;">
                         <input type="number" id="minVoltage" value="0" style="width: 50px; background: rgba(0,0,0,0.3); border: 1px solid var(--border-light); color: #fff; border-radius: 4px; padding: 2px 4px; font-size: 0.8rem;" onchange="updateChartScale('Voltage')">
                         <span style="color: var(--text-muted);">~</span>
@@ -327,11 +480,11 @@
             </div>
         </div>
     </div>
-    
+
     <!-- Records Tab -->
     <div id="tab-records" class="container" style="display: none; grid-template-columns: 1fr;">
         <div style="display: flex; flex-direction: column; gap: 2rem; max-width: 800px; margin: 0 auto; width: 100%;">
-            
+
             <div class="glass-panel">
                 <h2>新規メモを記録</h2>
                 <div style="display: flex; gap: 1rem; align-items: flex-start; margin-bottom: 1rem;">
@@ -375,14 +528,23 @@
     </div>
 
     <!-- Scripts -->
-    <script src="/static/app.js?v=20261015paddle"></script>
-    <script src="/static/paddle-plan.js?v=20261015"></script>
+    <script src="/static/app.js?v=20261102-theme"></script>
+    <script src="/static/paddle-plan.js?v=20261016F1"></script>
+    <script src="/static/flex-kappa1-plan.js?v=20261023"></script>
+    <script src="/static/flex-kappa1-interleaved-plan.js?v=20261024"></script>
+    <script src="/static/flex-hw-plan.js?v=20261022b"></script>
+    <script src="/static/current-zopt-plan.js?v=20261026-13point"></script>
+    <script src="/static/current-offset-plan.js?v=20261027-completion"></script>
+    <script src="/static/dual-recovery-plan.js?v=20261030-recovery1"></script>
+    <script src="/static/dual-sensor-plan.js?v=20261030-caldate"></script>
+    <script src="/static/current-convergence-plan.js?v=20261102-initial"></script>
+    <script src="/static/current-cycle-plan.js?v=20261029-cycle2"></script>
     <script>
         function switchTab(tabId) {
             document.getElementById('tab-fleet').style.display = tabId === 'fleet' ? 'grid' : 'none';
             document.getElementById('tab-monitor').style.display = tabId === 'monitor' ? 'flex' : 'none';
             document.getElementById('tab-records').style.display = tabId === 'records' ? 'grid' : 'none';
-            
+
             document.getElementById('btn-tab-fleet').className = tabId === 'fleet' ? 'tab-btn active' : 'tab-btn';
             document.getElementById('btn-tab-monitor').className = tabId === 'monitor' ? 'tab-btn active' : 'tab-btn';
             document.getElementById('btn-tab-records').className = tabId === 'records' ? 'tab-btn active' : 'tab-btn';

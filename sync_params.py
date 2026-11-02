@@ -98,9 +98,19 @@ def omega_for_agent(agent_id: int, params: dict[str, Any] | None = None) -> floa
     return float(p.get("default_omega_odd", 2.50 * math.pi))
 
 
+def _current_observer_scalars(agent_id: int, params: dict[str, Any]) -> tuple[float, float]:
+    obs = params.get("current_observer") or {}
+    by_agent = obs.get("by_agent") or {}
+    row = by_agent.get(str(agent_id)) or by_agent.get(agent_id) or {}
+    center = float(row.get("center_mA", 0.0))
+    width = float(row.get("width_mA", 0.0))
+    return center, width
+
+
 def build_param_payload(agent_id: int, params: dict[str, Any] | None = None) -> str:
     p = effective_prc_params(params or load_sync_params())
     omega = omega_for_agent(agent_id, p)
+    cur_center, cur_width = _current_observer_scalars(agent_id, p)
     source_name = "current" if bool(p.get("current_only", False)) else str(
         p.get("feedback_source", "flex")
     ).lower()
@@ -125,6 +135,13 @@ def build_param_payload(agent_id: int, params: dict[str, Any] | None = None) -> 
         b_key = f"prc_b{n}"
         fields.append(f"{a_key}:{float(p.get(a_key, 0.0)):.6f}")
         fields.append(f"{b_key}:{float(p.get(b_key, 0.0)):.6f}")
+    if cur_width > 0.0:
+        fields.append(f"cur_center:{cur_center:.6f}")
+        fields.append(f"cur_width:{cur_width:.6f}")
+        cycles = (p.get("current_observer") or {}).get("phase_cycles", 1)
+        if isinstance(cycles, bool) or cycles not in (1, 2):
+            raise ValueError("phase_cycles must be 1 or 2")
+        fields.append(f"cur_cycles:{cycles}")
     return ",".join(fields)
 
 
@@ -147,6 +164,8 @@ def parse_param_payload(payload: str) -> dict[str, Any]:
             out["z_mode"] = {v: k for k, v in Z_MODES.items()}.get(z_int, str(z_int))
         elif key in ("stop_id", "stop_delay", "prc_n"):
             out[key] = int(float(val))
+        elif key in ("cur_center", "cur_width"):
+            out[key] = float(val)
         else:
             try:
                 out[key] = float(val)
