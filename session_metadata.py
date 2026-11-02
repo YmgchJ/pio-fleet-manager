@@ -137,6 +137,7 @@ class SessionMetadataRecorder:
                 "status_recording": None,
                 "log_end": None,
                 "experiment_events": [],
+                "packet_clock_samples": [],
             }
         return self._agents[agent_id]
 
@@ -239,6 +240,21 @@ class SessionMetadataRecorder:
                     del self._pending_events[:-128]
                 return
             self._agent_bucket(agent_id)["experiment_events"].append(entry)
+
+    def record_packet_clock(self, agent_id: int, send_micros32: int,
+                            received_epoch_s: float, first_micros24: int,
+                            last_micros24: int, records: int) -> None:
+        """Retain one-way timing evidence; it does not prove synchronized clocks."""
+        with self._lock:
+            if self._session_id is None:
+                return
+            samples = self._agent_bucket(agent_id)["packet_clock_samples"]
+            if len(samples) < 4096:
+                samples.append({"send_micros32": int(send_micros32),
+                                "received_epoch_s": float(received_epoch_s),
+                                "first_micros24": int(first_micros24),
+                                "last_micros24": int(last_micros24),
+                                "records": int(records)})
 
     def record_log_end(
         self,
